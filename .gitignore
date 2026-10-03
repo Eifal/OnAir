@@ -1,0 +1,16 @@
+# Rust build output
+/target/
+
+# Local runtime config (generated next to exe / %APPDATA%)
+config.ini
+**/config.ini
+
+# Write-probe temp file
+.vm-mic-write-test.tmp
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.log
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,454 @@
+use std::path::{Path, PathBuf};
+
+/// Global toggle keybind. Keyboard uses Win32 virtual-key codes,
+/// mouse covers the five buttons visible to low-level hooks
+/// (extra vendor buttons are invisible to Windows itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseBtn {
+    Left,
+    Right,
+    Middle,
+    X1,
+    X2,
+}
+
+impl MouseBtn {
+    pub fn id(self) -> u8 {
+        match self {
+            MouseBtn::Left => 0,
+            MouseBtn::Right => 1,
+            MouseBtn::Middle => 2,
+            MouseBtn::X1 => 3,
+            MouseBtn::X2 => 4,
+        }
+    }
+
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(MouseBtn::Left),
+            1 => Some(MouseBtn::Right),
+            2 => Some(MouseBtn::Middle),
+            3 => Some(MouseBtn::X1),
+            4 => Some(MouseBtn::X2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleKey {
+    None,
+    Key(u16),
+    Mouse(MouseBtn),
+}
+
+impl ToggleKey {
+    pub fn is_none(self) -> bool {
+        matches!(self, ToggleKey::None)
+    }
+}
+
+/// Human label for menus/tooltips: "None", "F13", "A", "Mouse X1", ...
+pub fn toggle_key_name(k: ToggleKey) -> String {
+    match k {
+        ToggleKey::None => "None".to_string(),
+        ToggleKey::Mouse(b) => match b {
+            MouseBtn::Left => "Mouse Left".to_string(),
+            MouseBtn::Right => "Mouse Right".to_string(),
+            MouseBtn::Middle => "Mouse Middle".to_string(),
+            MouseBtn::X1 => "Mouse X1".to_string(),
+            MouseBtn::X2 => "Mouse X2".to_string(),
+        },
+        ToggleKey::Key(vk) => vk_name(vk),
+    }
+}
+
+/// Parse config values like "None", "F13", "A", "5", "Space",
+/// "MouseLeft", "Mouse X1". Unknown/empty (and Esc, reserved for
+/// capture-cancel) fall back to None. Never fails.
+pub fn parse_toggle_key(raw: &str) -> ToggleKey {
+    let norm: String = raw
+        .chars()
+        .filter(|c| *c != ' ' && *c != '_' && *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if norm.is_empty() || norm == "NONE" || norm == "OFF" || norm == "DISABLED" {
+        return ToggleKey::None;
+    }
+    if let Some(btn) = norm.strip_prefix("MOUSE") {
+        let b = match btn {
+            "LEFT" => Some(MouseBtn::Left),
+            "RIGHT" => Some(MouseBtn::Right),
+            "MIDDLE" => Some(MouseBtn::Middle),
+            "X1" | "B4" => Some(MouseBtn::X1),
+            "X2" | "B5" => Some(MouseBtn::X2),
+            _ => None,
+        };
+        return b.map(ToggleKey::Mouse).unwrap_or(ToggleKey::None);
+    }
+    // Single letter / digit.
+    if norm.len() == 1 {
+        let c = norm.as_bytes()[0];
+        if c.is_ascii_uppercase() || c.is_ascii_digit() {
+            return ToggleKey::Key(c as u16);
+        }
+        return ToggleKey::None;
+    }
+    // F1..F24.
+    if let Some(n) = norm.strip_prefix('F') {
+        if let Ok(f) = n.parse::<u32>() {
+            if (1..=24).contains(&f) {
+                return ToggleKey::Key(0x70 + (f - 1) as u16);
+            }
+        }
+        return ToggleKey::None;
+    }
+    let vk = match norm.as_str() {
+        "SPACE" => Some(0x20),
+        "ENTER" | "RETURN" => Some(0x0D),
+        "TAB" => Some(0x09),
+        "BACKSPACE" | "BACK" => Some(0x08),
+        "SHIFT" => Some(0x10),
+        "CTRL" | "CONTROL" => Some(0x11),
+        "ALT" => Some(0x12),
+        "CAPSLOCK" => Some(0x14),
+        "INSERT" | "INS" => Some(0x2D),
+        "DELETE" | "DEL" => Some(0x2E),
+        "HOME" => Some(0x24),
+        "END" => Some(0x23),
+        "PAGEUP" | "PGUP" => Some(0x21),
+        "PAGEDOWN" | "PGDN" | "PGDOWN" => Some(0x22),
+        "LEFT" => Some(0x25),
+        "UP" => Some(0x26),
+        "RIGHT" => Some(0x27),
+        "DOWN" => Some(0x28),
+        "NUMLOCK" => Some(0x90),
+        "SCROLL" | "SCROLLLOCK" => Some(0x91),
+        "PAUSE" | "BREAK" => Some(0x13),
+        "PRINTSCREEN" | "PRTSC" | "PRTSCR" => Some(0x2C),
+        "NUMPAD0" | "NUM0" => Some(0x60),
+        "NUMPAD1" | "NUM1" => Some(0x61),
+        "NUMPAD2" | "NUM2" => Some(0x62),
+        "NUMPAD3" | "NUM3" => Some(0x63),
+        "NUMPAD4" | "NUM4" => Some(0x64),
+        "NUMPAD5" | "NUM5" => Some(0x65),
+        "NUMPAD6" | "NUM6" => Some(0x66),
+        "NUMPAD7" | "NUM7" => Some(0x67),
+        "NUMPAD8" | "NUM8" => Some(0x68),
+        "NUMPAD9" | "NUM9" => Some(0x69),
+        "MULTIPLY" | "NUMPAD*" | "NUM*" => Some(0x6A),
+        "ADD" | "NUMPAD+" | "NUM+" | "NUMADD" => Some(0x6B),
+        "SEPARATOR" => Some(0x6C),
+        "SUBTRACT" | "NUMPAD-" | "NUM-" | "NUMSUB" => Some(0x6D),
+        "DECIMAL" | "NUMPAD." | "NUM." | "NUMDEC" | "NUMPADDECIMAL" => Some(0x6E),
+        "DIVIDE" | "NUMPAD/" | "NUM/" | "NUMDIV" => Some(0x6F),
+        // Esc is reserved for capture-cancel, never bindable.
+        _ => None,
+    };
+    vk.map(ToggleKey::Key).unwrap_or(ToggleKey::None)
+}
+
+fn vk_name(vk: u16) -> String {
+    if (0x41..=0x5A).contains(&vk) || (0x30..=0x39).contains(&vk) {
+        return (vk as u8 as char).to_string();
+    }
+    if (0x70..=0x87).contains(&vk) {
+        return format!("F{}", vk - 0x70 + 1);
+    }
+    if (0x60..=0x69).contains(&vk) {
+        return format!("Num{}", vk - 0x60);
+    }
+    match vk {
+        0x20 => "Space".to_string(),
+        0x0D => "Enter".to_string(),
+        0x09 => "Tab".to_string(),
+        0x08 => "Backspace".to_string(),
+        0x10 => "Shift".to_string(),
+        0x11 => "Ctrl".to_string(),
+        0x12 => "Alt".to_string(),
+        0x14 => "CapsLock".to_string(),
+        0x2D => "Insert".to_string(),
+        0x2E => "Delete".to_string(),
+        0x24 => "Home".to_string(),
+        0x23 => "End".to_string(),
+        0x21 => "PageUp".to_string(),
+        0x22 => "PageDown".to_string(),
+        0x25 => "Left".to_string(),
+        0x26 => "Up".to_string(),
+        0x27 => "Right".to_string(),
+        0x28 => "Down".to_string(),
+        0x90 => "NumLock".to_string(),
+        0x91 => "ScrollLock".to_string(),
+        0x13 => "Pause".to_string(),
+        0x2C => "PrintScreen".to_string(),
+        0x6A => "Num*".to_string(),
+        0x6B => "Num+".to_string(),
+        0x6C => "Separator".to_string(),
+        0x6D => "Num-".to_string(),
+        0x6E => "Num.".to_string(),
+        0x6F => "Num/".to_string(),
+        _ => format!("VK_{:#04X}", vk),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub x: i32,
+    pub y: i32,
+    pub size: u32,
+    pub opacity: u32,
+    pub locked: bool,
+    pub always_on_top: bool,
+    pub vm_param: String,
+    pub invert: bool,
+    pub poll_ms: u32,
+    pub toggle_key: ToggleKey,
+    pub color_on: (u8, u8, u8),
+    pub color_off: (u8, u8, u8),
+    pub color_unknown: (u8, u8, u8),
+    pub color_bg: (u8, u8, u8),
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            x: 40,
+            y: 40,
+            size: 48,
+            opacity: 90,
+            locked: false,
+            always_on_top: true,
+            vm_param: "Strip[0].B2".to_string(),
+            invert: false,
+            poll_ms: 100,
+            toggle_key: ToggleKey::None,
+            color_on: (0x2E, 0xCC, 0x71),
+            color_off: (0xE7, 0x4C, 0x3C),
+            color_unknown: (0x80, 0x80, 0x80),
+            color_bg: (0x14, 0x14, 0x14),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn clamp(&mut self) {
+        self.size = self.size.clamp(16, 512);
+        self.opacity = self.opacity.clamp(20, 100);
+        self.poll_ms = self.poll_ms.clamp(30, 1000);
+        if self.vm_param.trim().is_empty() {
+            self.vm_param = "Strip[0].B2".to_string();
+        }
+    }
+
+    pub fn config_path() -> PathBuf {
+        // 1. Try next to exe
+        if let Some(exe_path) = exe_path() {
+            let alongside = exe_path.join("config.ini");
+            if can_write_to_dir(&exe_path) {
+                return alongside;
+            }
+            // If file already exists next to exe (e.g. installed with write once), use it
+            if alongside.exists() {
+                return alongside;
+            }
+        }
+        // 2. Fallback %APPDATA%\vm-mic-indicator\config.ini
+        if let Some(appdata) = appdata_dir() {
+            let dir = appdata.join("vm-mic-indicator");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("config.ini");
+        }
+        // 3. Last resort: current dir
+        PathBuf::from("config.ini")
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        let mut cfg = Self::default();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // First run: create defaults
+            cfg.clamp();
+            let _ = cfg.save();
+            return cfg;
+        };
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let key = k.trim();
+            let val = v.trim();
+            match key {
+                "x" => if let Ok(n) = val.parse::<i32>() { cfg.x = n; },
+                "y" => if let Ok(n) = val.parse::<i32>() { cfg.y = n; },
+                "size" => if let Ok(n) = val.parse::<u32>() { cfg.size = n; },
+                "opacity" => if let Ok(n) = val.parse::<u32>() { cfg.opacity = n; },
+                "locked" => cfg.locked = parse_bool(val, cfg.locked),
+                "always_on_top" => cfg.always_on_top = parse_bool(val, cfg.always_on_top),
+                "vm_param" => if !val.is_empty() { cfg.vm_param = val.to_string(); },
+                "invert" => cfg.invert = parse_bool(val, cfg.invert),
+                "poll_ms" => if let Ok(n) = val.parse::<u32>() { cfg.poll_ms = n; },
+                "toggle_key" => cfg.toggle_key = parse_toggle_key(val),
+                "color_on" => if let Some(c) = parse_hex6(val) { cfg.color_on = c; },
+                "color_off" => if let Some(c) = parse_hex6(val) { cfg.color_off = c; },
+                "color_unknown" => if let Some(c) = parse_hex6(val) { cfg.color_unknown = c; },
+                "color_bg" => if let Some(c) = parse_hex6(val) { cfg.color_bg = c; },
+                // Unknown keys ignored (includes legacy macro_* from v0.3.0).
+                _ => {}
+            }
+        }
+        cfg.clamp();
+        cfg
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let content = format!(
+            "# OnAir config (key=value)\n\
+             x={}\n\
+             y={}\n\
+             size={}\n\
+             opacity={}\n\
+             locked={}\n\
+             always_on_top={}\n\
+             vm_param={}\n\
+             invert={}\n\
+             poll_ms={}\n\
+             toggle_key={}\n\
+             color_on={:02X}{:02X}{:02X}\n\
+             color_off={:02X}{:02X}{:02X}\n\
+             color_unknown={:02X}{:02X}{:02X}\n\
+             color_bg={:02X}{:02X}{:02X}\n",
+            self.x, self.y, self.size, self.opacity,
+            self.locked, self.always_on_top,
+            self.vm_param, self.invert, self.poll_ms,
+            toggle_key_name(self.toggle_key),
+            self.color_on.0, self.color_on.1, self.color_on.2,
+            self.color_off.0, self.color_off.1, self.color_off.2,
+            self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
+            self.color_bg.0, self.color_bg.1, self.color_bg.2,
+        );
+        std::fs::write(path, content)
+    }
+
+    /// Dot color for current mic state.
+    pub fn dot_color(&self, state: &crate::vm::MicState) -> (u8, u8, u8) {
+        use crate::vm::MicState::*;
+        match state {
+            On => self.color_on,
+            Off => self.color_off,
+            Unknown(_) => self.color_unknown,
+        }
+    }
+}
+
+fn parse_bool(v: &str, fallback: bool) -> bool {
+    match v.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
+pub fn parse_hex6(v: &str) -> Option<(u8, u8, u8)> {
+    let s = v.trim().trim_start_matches('#');
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+fn exe_path() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+fn can_write_to_dir(dir: &Path) -> bool {
+    // Try creating (and removing) a temp file. If that fails, dir is not writable.
+    // Also treat "config.ini already exists and is writable" via same probe.
+    let probe = dir.join(".vm-mic-write-test.tmp");
+    match std::fs::write(&probe, b"test") {
+        Ok(()) => { let _ = std::fs::remove_file(&probe); true }
+        Err(_) => false,
+    }
+}
+
+fn appdata_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_key_roundtrip() {
+        let cases = [
+            ToggleKey::None,
+            ToggleKey::Key(0x41), // A
+            ToggleKey::Key(0x35), // 5
+            ToggleKey::Key(0x7C), // F13
+            ToggleKey::Key(0x20), // Space
+            ToggleKey::Key(0x26), // Up
+            ToggleKey::Key(0x61), // Num1
+            ToggleKey::Key(0x65), // Num5
+            ToggleKey::Key(0x6B), // Num+
+            ToggleKey::Mouse(MouseBtn::Left),
+            ToggleKey::Mouse(MouseBtn::Right),
+            ToggleKey::Mouse(MouseBtn::Middle),
+            ToggleKey::Mouse(MouseBtn::X1),
+            ToggleKey::Mouse(MouseBtn::X2),
+        ];
+        for k in cases {
+            assert_eq!(parse_toggle_key(&toggle_key_name(k)), k, "roundtrip {k:?}");
+        }
+    }
+
+    #[test]
+    fn numpad_parse() {
+        assert_eq!(parse_toggle_key("Num1"), ToggleKey::Key(0x61));
+        assert_eq!(parse_toggle_key("NUMPAD5"), ToggleKey::Key(0x65));
+        assert_eq!(parse_toggle_key("num+"), ToggleKey::Key(0x6B));
+        assert_eq!(parse_toggle_key("Num/"), ToggleKey::Key(0x6F));
+        assert_eq!(toggle_key_name(ToggleKey::Key(0x61)), "Num1");
+    }
+
+    #[test]
+    fn toggle_key_parse_variants() {
+        assert_eq!(parse_toggle_key("None"), ToggleKey::None);
+        assert_eq!(parse_toggle_key(""), ToggleKey::None);
+        assert_eq!(parse_toggle_key("off"), ToggleKey::None);
+        assert_eq!(parse_toggle_key("f13"), ToggleKey::Key(0x7C));
+        assert_eq!(parse_toggle_key("F24"), ToggleKey::Key(0x87));
+        assert_eq!(parse_toggle_key("a"), ToggleKey::Key(0x41));
+        assert_eq!(parse_toggle_key("5"), ToggleKey::Key(0x35));
+        assert_eq!(parse_toggle_key("space"), ToggleKey::Key(0x20));
+        assert_eq!(parse_toggle_key("MouseX1"), ToggleKey::Mouse(MouseBtn::X1));
+        assert_eq!(parse_toggle_key("mouse x2"), ToggleKey::Mouse(MouseBtn::X2));
+        assert_eq!(parse_toggle_key("MOUSE_LEFT"), ToggleKey::Mouse(MouseBtn::Left));
+        assert_eq!(parse_toggle_key("MouseB4"), ToggleKey::Mouse(MouseBtn::X1));
+        assert_eq!(parse_toggle_key("MouseB5"), ToggleKey::Mouse(MouseBtn::X2));
+        // Esc is reserved for capture-cancel, never bindable.
+        assert_eq!(parse_toggle_key("Esc"), ToggleKey::None);
+        assert_eq!(parse_toggle_key("Escape"), ToggleKey::None);
+        // Garbage never fails, falls back to None.
+        assert_eq!(parse_toggle_key("F99"), ToggleKey::None);
+        assert_eq!(parse_toggle_key("MouseX9"), ToggleKey::None);
+        assert_eq!(parse_toggle_key("???"), ToggleKey::None);
+    }
+
+    #[test]
+    fn mouse_btn_ids() {
+        for id in 0..5u8 {
+            let b = MouseBtn::from_id(id).unwrap();
+            assert_eq!(b.id(), id);
+        }
+        assert!(MouseBtn::from_id(5).is_none());
+    }
+}
