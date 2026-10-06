@@ -53,8 +53,9 @@ Left and right click both open the menu:
 - Lock position (checkmark)
 - Always on top (checkmark, re-asserted ~every 2 s)
 - Size: 24, 32, 48, 64, 96, 128 px
-- Opacity: 100 … 20 %
+- Opacity: 100 … 20 % (whole window)
 - Visual: Dot / Ring / Bar / Mini (see below)
+- Background: 100 / 90 / 70 / 50 / 30 / Transparent (bg square only)
 - Voicemeeter source:
   - Strip 1–8 (→ `Strip[n-1]`)
   - Button A1–A5, B1–B3, Mute
@@ -90,6 +91,7 @@ toggle_key=None
 trigger_mode=toggle
 hold_tap_ms=300
 visual_style=dot
+bg_opacity=90
 color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
@@ -97,7 +99,7 @@ color_bg=141414
 ```
 
 Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
-`hold_tap_ms` 100–2000. Colors are 6-digit hex without `#`.
+`hold_tap_ms` 100–2000, `bg_opacity` 0–100. Colors are 6-digit hex without `#`.
 `trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
 `ptt`, `toggle+hold`); unknown falls back to `toggle`.
 `visual_style` accepts `dot` / `ring` / `bar` / `mini`
@@ -116,6 +118,19 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 
 Tray → **Visual** switches instantly and saves `config.ini`.
 Tray icon always stays Dot for recognizability.
+
+## Background transparency (`bg_opacity`)
+
+- Only the rounded-square background fades; the colored
+  dot/ring/strip stays fully opaque for readability.
+- Global **Opacity** still applies on top of everything
+  (e.g. `opacity=50` + `bg_opacity=50` = very faint bg).
+- `bg_opacity=0` = no background at all (floating dot/ring/strip).
+  Hitbox/drag area stays `size`×`size` — only the paint changes,
+  click-through when locked is unaffected.
+- No effect on **Mini** (already has no background).
+- Tray → **Background** or `config.ini` (`bg_opacity`, aliases
+  `bg_alpha`, `background_opacity`).
 
 - `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
   Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.

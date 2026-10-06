@@ -284,6 +284,7 @@ pub struct AppConfig {
     pub trigger_mode: TriggerMode,
     pub hold_tap_ms: u32,
     pub visual_style: VisualStyle,
+    pub bg_opacity: u32,
     pub color_on: (u8, u8, u8),
     pub color_off: (u8, u8, u8),
     pub color_unknown: (u8, u8, u8),
@@ -306,6 +307,7 @@ impl Default for AppConfig {
             trigger_mode: TriggerMode::Toggle,
             hold_tap_ms: 300,
             visual_style: VisualStyle::Dot,
+            bg_opacity: 90,
             color_on: (0x2E, 0xCC, 0x71),
             color_off: (0xE7, 0x4C, 0x3C),
             color_unknown: (0x80, 0x80, 0x80),
@@ -320,6 +322,7 @@ impl AppConfig {
         self.opacity = self.opacity.clamp(20, 100);
         self.poll_ms = self.poll_ms.clamp(30, 1000);
         self.hold_tap_ms = self.hold_tap_ms.clamp(100, 2000);
+        self.bg_opacity = self.bg_opacity.clamp(0, 100);
         if self.vm_param.trim().is_empty() {
             self.vm_param = "Strip[0].B2".to_string();
         }
@@ -378,6 +381,7 @@ impl AppConfig {
                 "trigger_mode" => cfg.trigger_mode = parse_trigger_mode(val),
                 "hold_tap_ms" | "hold_ms" | "tap_ms" => if let Ok(n) = val.parse::<u32>() { cfg.hold_tap_ms = n; },
                 "visual_style" | "visual" | "style" => cfg.visual_style = parse_visual_style(val),
+                "bg_opacity" | "bg_alpha" | "background_opacity" => if let Ok(n) = val.parse::<u32>() { cfg.bg_opacity = n; },
                 "color_on" => if let Some(c) = parse_hex6(val) { cfg.color_on = c; },
                 "color_off" => if let Some(c) = parse_hex6(val) { cfg.color_off = c; },
                 "color_unknown" => if let Some(c) = parse_hex6(val) { cfg.color_unknown = c; },
@@ -412,6 +416,7 @@ impl AppConfig {
              trigger_mode={}\n\
              hold_tap_ms={}\n\
              visual_style={}\n\
+             bg_opacity={}\n\
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
@@ -422,6 +427,7 @@ impl AppConfig {
             toggle_key_name(self.toggle_key),
             self.trigger_mode.as_str(), self.hold_tap_ms,
             self.visual_style.as_str(),
+            self.bg_opacity,
             self.color_on.0, self.color_on.1, self.color_on.2,
             self.color_off.0, self.color_off.1, self.color_off.2,
             self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
@@ -591,5 +597,14 @@ mod tests {
         assert_eq!(VisualStyle::Ring.as_str(), "ring");
         assert_eq!(VisualStyle::Bar.as_str(), "bar");
         assert_eq!(VisualStyle::Mini.as_str(), "mini");
+    }
+
+    #[test]
+    fn bg_opacity_clamp() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.bg_opacity, 90);
+        cfg.bg_opacity = 500;
+        cfg.clamp();
+        assert_eq!(cfg.bg_opacity, 100);
     }
 }

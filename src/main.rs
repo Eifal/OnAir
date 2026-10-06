@@ -74,7 +74,7 @@ fn sync_pos_from_window() {
 
 fn redraw_locked() {
     // Redraw overlay from current cfg + mic state.
-    let (hwnd, size, opacity, locked, bg, dot, style) = {
+    let (hwnd, size, opacity, locked, bg, dot, style, bg_op) = {
         let a = app_mut();
         (
             a.hwnd,
@@ -84,9 +84,10 @@ fn redraw_locked() {
             a.cfg.color_bg,
             a.cfg.dot_color(&a.mic),
             a.cfg.visual_style,
+            a.cfg.bg_opacity,
         )
     };
-    let pixels = render::draw_overlay(size, bg, dot, !locked, style);
+    let pixels = render::draw_overlay(size, bg, dot, !locked, style, bg_op);
     render::update_layered_window(hwnd, &pixels, size, opacity);
 }
 
@@ -716,6 +717,15 @@ fn handle_command(hwnd: HWND, id: u32) {
             redraw_locked();
             let _ = app_mut().cfg.save();
             refresh_tray();
+        }
+        return;
+    }
+    if (ID_BG_BASE..ID_BG_BASE + 6).contains(&id) {
+        let idx = (id - ID_BG_BASE) as usize;
+        if let Some(&o) = BG_OPACITIES.get(idx) {
+            app_mut().cfg.bg_opacity = o;
+            redraw_locked();
+            let _ = app_mut().cfg.save();
         }
         return;
     }

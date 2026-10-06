@@ -25,9 +25,11 @@ pub const ID_TRIGGER_HOLD: u32 = 1611;
 pub const ID_TRIGGER_BOTH: u32 = 1612;
 pub const ID_HOLDMS_BASE: u32 = 1620; // +0..3 -> 200,300,500,800 ms
 pub const ID_VISUAL_BASE: u32 = 1700; // +0..3 -> Dot, Ring, Bar, Mini
+pub const ID_BG_BASE: u32 = 1710; // +0..5 -> bg opacity presets
 
 pub const SIZES: [u32; 6] = [24, 32, 48, 64, 96, 128];
 pub const OPACITIES: [u32; 9] = [100, 90, 80, 70, 60, 50, 40, 30, 20];
+pub const BG_OPACITIES: [u32; 6] = [100, 90, 70, 50, 30, 0];
 pub const BUTTONS: [&str; 9] = ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "Mute"];
 pub const HOLD_TAPS: [u32; 4] = [200, 300, 500, 800];
 pub const VISUALS: [(VisualStyle, &str); 4] = [
@@ -205,6 +207,33 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
         {
             let w = to_wide("Visual");
             let _ = AppendMenuW(hmenu, MF_POPUP, hvis.0 as usize, PCWSTR(w.as_ptr()));
+        }
+
+        // Background transparency submenu (bg square only,
+        // foreground dot/ring/bar stays opaque).
+        let hbg = CreatePopupMenu().unwrap_or_default();
+        if !BG_OPACITIES.contains(&cfg.bg_opacity) {
+            append_text(
+                hbg,
+                0xFFFC,
+                &format!("Custom: {} %", cfg.bg_opacity),
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
+            );
+            let _ = AppendMenuW(hbg, MF_SEPARATOR, 0, None);
+        }
+        for (i, o) in BG_OPACITIES.iter().enumerate() {
+            let checked = *o == cfg.bg_opacity;
+            let label = if *o == 0 { "Transparent (no bg)".to_string() } else { format!("{} %", o) };
+            append_text(
+                hbg,
+                ID_BG_BASE + i as u32,
+                &label,
+                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+            );
+        }
+        {
+            let w = to_wide("Background");
+            let _ = AppendMenuW(hmenu, MF_POPUP, hbg.0 as usize, PCWSTR(w.as_ptr()));
         }
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 

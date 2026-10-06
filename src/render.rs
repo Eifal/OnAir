@@ -20,12 +20,15 @@ pub fn draw_overlay(
     dot: (u8, u8, u8),
     unlocked: bool,
     style: VisualStyle,
+    bg_opacity: u32,
 ) -> Vec<u32> {
     let s = size as f32;
     let half = s / 2.0;
     let radius = s * 0.22;
-    // BG base alpha ~90%
-    const BG_ALPHA: f32 = 230.0;
+    // Background alpha 0..100% -> 0..255. Foreground (dot/ring/bar)
+    // stays fully opaque; global `opacity` still applies on top via
+    // SourceConstantAlpha in update_layered_window.
+    let bg_alpha: f32 = (bg_opacity.clamp(0, 100) as f32 * 255.0 / 100.0).clamp(0.0, 255.0);
 
     let mut px = vec![0u32; (size as usize) * (size as usize)];
     let box_half = half - radius; // for rounded-rect SDF
@@ -103,7 +106,7 @@ pub fn draw_overlay(
                 r = bg.0 as f32;
                 g = bg.1 as f32;
                 b = bg.2 as f32;
-                a = cov_bg * (BG_ALPHA / 255.0);
+                a = cov_bg * (bg_alpha / 255.0);
             }
 
             // fg over bg: out_a = fg_a + bg_a*(1-fg_a)
@@ -236,12 +239,12 @@ pub fn update_layered_window(
 }
 
 /// Build a small tray icon (16x16 or SM_CXSMICON) with the same rasterizer.
-/// Always Dot style for recognizability. Returns None on failure.
+/// Always Dot style with opaque bg for recognizability. Returns None on failure.
 pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
     unsafe {
         let dim = GetSystemMetrics(SM_CXSMICON);
         let dim = if dim <= 0 { 16 } else { dim.min(32) } as u32;
-        let pixels = draw_overlay(dim, bg, dot, false, VisualStyle::Dot);
+        let pixels = draw_overlay(dim, bg, dot, false, VisualStyle::Dot, 90);
 
         // Color bitmap (32bpp, top-down DIB -> HBITMAP)
         let hdc_screen = GetDC(None);
