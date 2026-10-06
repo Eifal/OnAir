@@ -72,6 +72,47 @@ pub fn parse_trigger_mode(raw: &str) -> TriggerMode {
     }
 }
 
+/// Overlay visual style. All styles share the same square window
+/// (same drag/click area), only the drawing differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualStyle {
+    /// Rounded square bg + filled circle (existing look).
+    Dot,
+    /// Rounded square bg + colored ring, transparent center.
+    Ring,
+    /// Rounded square bg + thin colored strip at the bottom.
+    Bar,
+    /// No bg, just a small filled dot (smallest footprint).
+    Mini,
+}
+
+impl VisualStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VisualStyle::Dot => "dot",
+            VisualStyle::Ring => "ring",
+            VisualStyle::Bar => "bar",
+            VisualStyle::Mini => "mini",
+        }
+    }
+}
+
+/// Parse visual_style values. Unknown falls back to Dot. Never fails.
+pub fn parse_visual_style(raw: &str) -> VisualStyle {
+    let norm: String = raw
+        .chars()
+        .filter(|c| *c != ' ' && *c != '_' && *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match norm.as_str() {
+        "RING" | "CIRCLE" | "OUTLINE" | "DONUT" => VisualStyle::Ring,
+        "BAR" | "STRIP" | "LINE" | "PILL" => VisualStyle::Bar,
+        "MINI" | "MINIMAL" | "DOTONLY" | "SMALL" | "NOBG" => VisualStyle::Mini,
+        // "DOT", "CIRCLE-FILLED" and anything unknown -> Dot.
+        _ => VisualStyle::Dot,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleKey {
     None,
@@ -242,6 +283,7 @@ pub struct AppConfig {
     pub toggle_key: ToggleKey,
     pub trigger_mode: TriggerMode,
     pub hold_tap_ms: u32,
+    pub visual_style: VisualStyle,
     pub color_on: (u8, u8, u8),
     pub color_off: (u8, u8, u8),
     pub color_unknown: (u8, u8, u8),
@@ -263,6 +305,7 @@ impl Default for AppConfig {
             toggle_key: ToggleKey::None,
             trigger_mode: TriggerMode::Toggle,
             hold_tap_ms: 300,
+            visual_style: VisualStyle::Dot,
             color_on: (0x2E, 0xCC, 0x71),
             color_off: (0xE7, 0x4C, 0x3C),
             color_unknown: (0x80, 0x80, 0x80),
@@ -334,6 +377,7 @@ impl AppConfig {
                 "toggle_key" => cfg.toggle_key = parse_toggle_key(val),
                 "trigger_mode" => cfg.trigger_mode = parse_trigger_mode(val),
                 "hold_tap_ms" | "hold_ms" | "tap_ms" => if let Ok(n) = val.parse::<u32>() { cfg.hold_tap_ms = n; },
+                "visual_style" | "visual" | "style" => cfg.visual_style = parse_visual_style(val),
                 "color_on" => if let Some(c) = parse_hex6(val) { cfg.color_on = c; },
                 "color_off" => if let Some(c) = parse_hex6(val) { cfg.color_off = c; },
                 "color_unknown" => if let Some(c) = parse_hex6(val) { cfg.color_unknown = c; },
@@ -367,6 +411,7 @@ impl AppConfig {
              toggle_key={}\n\
              trigger_mode={}\n\
              hold_tap_ms={}\n\
+             visual_style={}\n\
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
@@ -376,6 +421,7 @@ impl AppConfig {
             self.vm_param, self.invert, self.poll_ms,
             toggle_key_name(self.toggle_key),
             self.trigger_mode.as_str(), self.hold_tap_ms,
+            self.visual_style.as_str(),
             self.color_on.0, self.color_on.1, self.color_on.2,
             self.color_off.0, self.color_off.1, self.color_off.2,
             self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
@@ -526,5 +572,24 @@ mod tests {
         cfg.hold_tap_ms = 9999;
         cfg.clamp();
         assert_eq!(cfg.hold_tap_ms, 2000);
+    }
+
+    #[test]
+    fn visual_style_parse() {
+        assert_eq!(parse_visual_style("dot"), VisualStyle::Dot);
+        assert_eq!(parse_visual_style("DOT"), VisualStyle::Dot);
+        assert_eq!(parse_visual_style("ring"), VisualStyle::Ring);
+        assert_eq!(parse_visual_style("circle"), VisualStyle::Ring);
+        assert_eq!(parse_visual_style("bar"), VisualStyle::Bar);
+        assert_eq!(parse_visual_style("strip"), VisualStyle::Bar);
+        assert_eq!(parse_visual_style("pill"), VisualStyle::Bar);
+        assert_eq!(parse_visual_style("mini"), VisualStyle::Mini);
+        assert_eq!(parse_visual_style("minimal"), VisualStyle::Mini);
+        assert_eq!(parse_visual_style(""), VisualStyle::Dot);
+        assert_eq!(parse_visual_style("garbage"), VisualStyle::Dot);
+        assert_eq!(VisualStyle::Dot.as_str(), "dot");
+        assert_eq!(VisualStyle::Ring.as_str(), "ring");
+        assert_eq!(VisualStyle::Bar.as_str(), "bar");
+        assert_eq!(VisualStyle::Mini.as_str(), "mini");
     }
 }

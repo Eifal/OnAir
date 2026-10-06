@@ -3,7 +3,7 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
-use crate::config::{AppConfig, TriggerMode};
+use crate::config::{AppConfig, TriggerMode, VisualStyle};
 use crate::vm::MicState;
 use crate::window::{to_wide, WM_TRAY};
 
@@ -24,11 +24,18 @@ pub const ID_TRIGGER_TOGGLE: u32 = 1610;
 pub const ID_TRIGGER_HOLD: u32 = 1611;
 pub const ID_TRIGGER_BOTH: u32 = 1612;
 pub const ID_HOLDMS_BASE: u32 = 1620; // +0..3 -> 200,300,500,800 ms
+pub const ID_VISUAL_BASE: u32 = 1700; // +0..3 -> Dot, Ring, Bar, Mini
 
 pub const SIZES: [u32; 6] = [24, 32, 48, 64, 96, 128];
 pub const OPACITIES: [u32; 9] = [100, 90, 80, 70, 60, 50, 40, 30, 20];
 pub const BUTTONS: [&str; 9] = ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "Mute"];
 pub const HOLD_TAPS: [u32; 4] = [200, 300, 500, 800];
+pub const VISUALS: [(VisualStyle, &str); 4] = [
+    (VisualStyle::Dot, "Dot (filled circle)"),
+    (VisualStyle::Ring, "Ring (hollow circle)"),
+    (VisualStyle::Bar, "Bar (thin strip)"),
+    (VisualStyle::Mini, "Mini (no background)"),
+];
 
 const TRAY_UID: u32 = 1;
 
@@ -182,6 +189,22 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
         {
             let w = to_wide("Opacity");
             let _ = AppendMenuW(hmenu, MF_POPUP, hop.0 as usize, PCWSTR(w.as_ptr()));
+        }
+
+        // Visual style submenu (small, non-intrusive overlays)
+        let hvis = CreatePopupMenu().unwrap_or_default();
+        for (i, (style, label)) in VISUALS.iter().enumerate() {
+            let checked = *style == cfg.visual_style;
+            append_text(
+                hvis,
+                ID_VISUAL_BASE + i as u32,
+                label,
+                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+            );
+        }
+        {
+            let w = to_wide("Visual");
+            let _ = AppendMenuW(hmenu, MF_POPUP, hvis.0 as usize, PCWSTR(w.as_ptr()));
         }
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 

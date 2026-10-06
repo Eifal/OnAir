@@ -54,6 +54,7 @@ Left and right click both open the menu:
 - Always on top (checkmark, re-asserted ~every 2 s)
 - Size: 24, 32, 48, 64, 96, 128 px
 - Opacity: 100 … 20 %
+- Visual: Dot / Ring / Bar / Mini (see below)
 - Voicemeeter source:
   - Strip 1–8 (→ `Strip[n-1]`)
   - Button A1–A5, B1–B3, Mute
@@ -88,6 +89,7 @@ poll_ms=100
 toggle_key=None
 trigger_mode=toggle
 hold_tap_ms=300
+visual_style=dot
 color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
@@ -98,6 +100,22 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 `hold_tap_ms` 100–2000. Colors are 6-digit hex without `#`.
 `trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
 `ptt`, `toggle+hold`); unknown falls back to `toggle`.
+`visual_style` accepts `dot` / `ring` / `bar` / `mini`
+(aliases: `strip`/`pill` → bar, `circle`/`outline` → ring,
+`minimal`/`nobg` → mini); unknown falls back to `dot`.
+
+## Visual styles (all small, same square hitbox)
+
+- **Dot** — rounded square + filled circle (default, most visible).
+- **Ring** — rounded square + hollow colored ring, dark center
+  (less glare at night, still easy to read).
+- **Bar** — rounded square + thin colored strip at the bottom
+  (smallest color area, good for corner placement).
+- **Mini** — no background, just a small dot (~54% size)
+  (minimal footprint; use 32–48 px, 80–100% opacity).
+
+Tray → **Visual** switches instantly and saves `config.ini`.
+Tray icon always stays Dot for recognizability.
 
 - `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
   Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.

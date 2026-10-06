@@ -2,27 +2,40 @@ use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::config::VisualStyle;
+
 /// Draw overlay pixels (BGRA premultiplied, top-down) of `size`x`size`.
 ///
-/// - rounded square bg (`bg`, ~90% alpha, radius 22% of size)
-/// - centered filled circle (`dot`, diameter 80% of size)
-/// - when `unlocked`, thin light outline around the rounded square
-/// - SDF AA: coverage = clamp(0.5 - dist, 0, 1)
+/// Styles (same square window, only drawing differs):
+/// - Dot: rounded square bg + centered filled circle (diameter 80%)
+/// - Ring: rounded square bg + colored ring (outer 80%, thickness ~10%)
+/// - Bar: rounded square bg + thin colored strip at the bottom
+/// - Mini: no bg, just a small filled dot (diameter ~54%)
+///
+/// When `unlocked`, thin light outline around the rounded square.
+/// SDF AA: coverage = clamp(0.5 - dist, 0, 1)
 pub fn draw_overlay(
     size: u32,
     bg: (u8, u8, u8),
     dot: (u8, u8, u8),
     unlocked: bool,
+    style: VisualStyle,
 ) -> Vec<u32> {
     let s = size as f32;
     let half = s / 2.0;
     let radius = s * 0.22;
-    let dot_r = s * 0.40; // diameter 80%
     // BG base alpha ~90%
     const BG_ALPHA: f32 = 230.0;
 
     let mut px = vec![0u32; (size as usize) * (size as usize)];
     let box_half = half - radius; // for rounded-rect SDF
+
+    // Bar geometry (shared for Bar style): thin strip at the bottom.
+    let bar_cx = half;
+    let bar_cy = s * 0.765;
+    let bar_hw = s * 0.35; // half width
+    let bar_hh = s * 0.085; // half height
+    let bar_r = (s * 0.06).min(bar_hw).min(bar_hh);
 
     for y in 0..size {
         for x in 0..size {
@@ -39,32 +52,78 @@ pub fn draw_overlay(
             let dist_rr = outside + inside - radius;
             let cov_bg = (0.5 - dist_rr).clamp(0.0, 1.0);
 
-            // Circle SDF
             let dx = fx - half;
             let dy = fy - half;
-            let dist_c = (dx * dx + dy * dy).sqrt() - dot_r;
-            let cov_dot = (0.5 - dist_c).clamp(0.0, 1.0);
+            let dist_center = (dx * dx + dy * dy).sqrt();
 
-            // Composite: bg first, then dot over it (both non-premultiplied blend, then premultiply)
-            // bg: rgb=bg, a = cov_bg * BG_ALPHA/255
-            let mut r = bg.0 as f32;
-            let mut g = bg.1 as f32;
-            let mut b = bg.2 as f32;
-            let mut a = cov_bg * (BG_ALPHA / 255.0);
+            // Foreground coverage by style.
+            let (fg_cov, use_dot_color) = match style {
+                VisualStyle::Dot => {
+                    let dot_r = s * 0.40; // diameter 80%
+                    ((0.5 - (dist_center - dot_r)).clamp(0.0, 1.0), true)
+                }
+                VisualStyle::Ring => {
+                    // Ring: outer ~80% diameter, thickness ~10% of size.
+                    let r_mid = s * 0.35;
+                    let half_thick = s * 0.05;
+                    (
+                        (half_thick + 0.5 - (dist_center - r_mid).abs())
+                            .clamp(0.0, 1.0),
+                        true,
+                    )
+                }
+                VisualStyle::Bar => {
+                    // Rounded bar SDF.
+                    let bqx = (fx - bar_cx).abs() - (bar_hw - bar_r);
+                    let bqy = (fy - bar_cy).abs() - (bar_hh - bar_r);
+                    let bax = bqx.max(0.0);
+                    let bay = bqy.max(0.0);
+                    let b_out = (bax * bax + bay * bay).sqrt();
+                    let b_in = bqx.max(bqy).min(0.0);
+                    let dist_bar = b_out + b_in - bar_r;
+                    ((0.5 - dist_bar).clamp(0.0, 1.0), true)
+                }
+                VisualStyle::Mini => {
+                    let mini_r = s * 0.27; // diameter ~54%
+                    ((0.5 - (dist_center - mini_r)).clamp(0.0, 1.0), true)
+                }
+            };
 
-            // dot over bg: out_a = dot_a + bg_a*(1-dot_a); out_rgb = (dot*dot_a + bg*bg_a*(1-dot_a))/out_a
-            let dot_a = cov_dot; // opaque circle with AA edge
-            if dot_a > 0.0 {
-                let out_a = dot_a + a * (1.0 - dot_a);
+            // Composite: bg first (none for Mini), then fg over it.
+            let mut r: f32;
+            let mut g: f32;
+            let mut b: f32;
+            let mut a: f32;
+            if style == VisualStyle::Mini {
+                r = 0.0;
+                g = 0.0;
+                b = 0.0;
+                a = 0.0;
+            } else {
+                r = bg.0 as f32;
+                g = bg.1 as f32;
+                b = bg.2 as f32;
+                a = cov_bg * (BG_ALPHA / 255.0);
+            }
+
+            // fg over bg: out_a = fg_a + bg_a*(1-fg_a)
+            let (fr, fg, fb) = if use_dot_color {
+                (dot.0 as f32, dot.1 as f32, dot.2 as f32)
+            } else {
+                (dot.0 as f32, dot.1 as f32, dot.2 as f32)
+            };
+            if fg_cov > 0.0 {
+                let out_a = fg_cov + a * (1.0 - fg_cov);
                 if out_a > 0.0001 {
-                    r = (dot.0 as f32 * dot_a + r * a * (1.0 - dot_a)) / out_a;
-                    g = (dot.1 as f32 * dot_a + g * a * (1.0 - dot_a)) / out_a;
-                    b = (dot.2 as f32 * dot_a + b * a * (1.0 - dot_a)) / out_a;
+                    r = (fr * fg_cov + r * a * (1.0 - fg_cov)) / out_a;
+                    g = (fg * fg_cov + g * a * (1.0 - fg_cov)) / out_a;
+                    b = (fb * fg_cov + b * a * (1.0 - fg_cov)) / out_a;
                 }
                 a = out_a;
             }
 
-            // Unlocked outline: bright ring centered at dist_rr = -1, width ~2px
+            // Unlocked outline: bright ring centered at dist_rr = -1, width ~2px.
+            // Drawn even for Mini so drag bounds stay visible.
             if unlocked {
                 let ring = (1.0 - (dist_rr + 1.0).abs()).clamp(0.0, 1.0);
                 if ring > 0.0 {
@@ -177,12 +236,12 @@ pub fn update_layered_window(
 }
 
 /// Build a small tray icon (16x16 or SM_CXSMICON) with the same rasterizer.
-/// Returns None on failure (caller keeps old icon).
+/// Always Dot style for recognizability. Returns None on failure.
 pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
     unsafe {
         let dim = GetSystemMetrics(SM_CXSMICON);
         let dim = if dim <= 0 { 16 } else { dim.min(32) } as u32;
-        let pixels = draw_overlay(dim, bg, dot, false);
+        let pixels = draw_overlay(dim, bg, dot, false, VisualStyle::Dot);
 
         // Color bitmap (32bpp, top-down DIB -> HBITMAP)
         let hdc_screen = GetDC(None);
