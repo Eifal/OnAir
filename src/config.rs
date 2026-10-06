@@ -35,6 +35,43 @@ impl MouseBtn {
     }
 }
 
+/// How the toggle-key bind activates the mic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// Key/button down flips the parameter (existing behavior).
+    Toggle,
+    /// While held the mic is forced ON, on release it returns to the
+    /// state saved on key-down (push-to-talk).
+    Hold,
+    /// Tap (< hold_tap_ms) toggles, longer hold is momentary.
+    Both,
+}
+
+impl TriggerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriggerMode::Toggle => "toggle",
+            TriggerMode::Hold => "hold",
+            TriggerMode::Both => "both",
+        }
+    }
+}
+
+/// Parse trigger_mode values. Accepts common aliases, falls back to Toggle.
+pub fn parse_trigger_mode(raw: &str) -> TriggerMode {
+    let norm: String = raw
+        .chars()
+        .filter(|c| *c != ' ' && *c != '_' && *c != '-' && *c != '+')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match norm.as_str() {
+        "HOLD" | "PTT" | "PUSHTOTALK" | "MOMENTARY" => TriggerMode::Hold,
+        "BOTH" | "TOGGLEHOLD" | "HOLDTOGGLE" | "PRESSHOLD" | "TAPANDHOLD" => TriggerMode::Both,
+        // "TOGGLE", "PRESS", "TAP" and anything unknown -> Toggle.
+        _ => TriggerMode::Toggle,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleKey {
     None,
@@ -203,6 +240,8 @@ pub struct AppConfig {
     pub invert: bool,
     pub poll_ms: u32,
     pub toggle_key: ToggleKey,
+    pub trigger_mode: TriggerMode,
+    pub hold_tap_ms: u32,
     pub color_on: (u8, u8, u8),
     pub color_off: (u8, u8, u8),
     pub color_unknown: (u8, u8, u8),
@@ -222,6 +261,8 @@ impl Default for AppConfig {
             invert: false,
             poll_ms: 100,
             toggle_key: ToggleKey::None,
+            trigger_mode: TriggerMode::Toggle,
+            hold_tap_ms: 300,
             color_on: (0x2E, 0xCC, 0x71),
             color_off: (0xE7, 0x4C, 0x3C),
             color_unknown: (0x80, 0x80, 0x80),
@@ -235,6 +276,7 @@ impl AppConfig {
         self.size = self.size.clamp(16, 512);
         self.opacity = self.opacity.clamp(20, 100);
         self.poll_ms = self.poll_ms.clamp(30, 1000);
+        self.hold_tap_ms = self.hold_tap_ms.clamp(100, 2000);
         if self.vm_param.trim().is_empty() {
             self.vm_param = "Strip[0].B2".to_string();
         }
@@ -290,6 +332,8 @@ impl AppConfig {
                 "invert" => cfg.invert = parse_bool(val, cfg.invert),
                 "poll_ms" => if let Ok(n) = val.parse::<u32>() { cfg.poll_ms = n; },
                 "toggle_key" => cfg.toggle_key = parse_toggle_key(val),
+                "trigger_mode" => cfg.trigger_mode = parse_trigger_mode(val),
+                "hold_tap_ms" | "hold_ms" | "tap_ms" => if let Ok(n) = val.parse::<u32>() { cfg.hold_tap_ms = n; },
                 "color_on" => if let Some(c) = parse_hex6(val) { cfg.color_on = c; },
                 "color_off" => if let Some(c) = parse_hex6(val) { cfg.color_off = c; },
                 "color_unknown" => if let Some(c) = parse_hex6(val) { cfg.color_unknown = c; },
@@ -321,6 +365,8 @@ impl AppConfig {
              invert={}\n\
              poll_ms={}\n\
              toggle_key={}\n\
+             trigger_mode={}\n\
+             hold_tap_ms={}\n\
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
@@ -329,6 +375,7 @@ impl AppConfig {
             self.locked, self.always_on_top,
             self.vm_param, self.invert, self.poll_ms,
             toggle_key_name(self.toggle_key),
+            self.trigger_mode.as_str(), self.hold_tap_ms,
             self.color_on.0, self.color_on.1, self.color_on.2,
             self.color_off.0, self.color_off.1, self.color_off.2,
             self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
@@ -450,5 +497,34 @@ mod tests {
             assert_eq!(b.id(), id);
         }
         assert!(MouseBtn::from_id(5).is_none());
+    }
+
+    #[test]
+    fn trigger_mode_parse() {
+        assert_eq!(parse_trigger_mode("toggle"), TriggerMode::Toggle);
+        assert_eq!(parse_trigger_mode("TOGGLE"), TriggerMode::Toggle);
+        assert_eq!(parse_trigger_mode("press"), TriggerMode::Toggle);
+        assert_eq!(parse_trigger_mode("hold"), TriggerMode::Hold);
+        assert_eq!(parse_trigger_mode("HOLD"), TriggerMode::Hold);
+        assert_eq!(parse_trigger_mode("ptt"), TriggerMode::Hold);
+        assert_eq!(parse_trigger_mode("both"), TriggerMode::Both);
+        assert_eq!(parse_trigger_mode("toggle+hold"), TriggerMode::Both);
+        assert_eq!(parse_trigger_mode(""), TriggerMode::Toggle);
+        assert_eq!(parse_trigger_mode("garbage"), TriggerMode::Toggle);
+        assert_eq!(TriggerMode::Toggle.as_str(), "toggle");
+        assert_eq!(TriggerMode::Hold.as_str(), "hold");
+        assert_eq!(TriggerMode::Both.as_str(), "both");
+    }
+
+    #[test]
+    fn hold_tap_ms_clamp() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.hold_tap_ms, 300);
+        cfg.hold_tap_ms = 0;
+        cfg.clamp();
+        assert_eq!(cfg.hold_tap_ms, 100);
+        cfg.hold_tap_ms = 9999;
+        cfg.clamp();
+        assert_eq!(cfg.hold_tap_ms, 2000);
     }
 }

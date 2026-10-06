@@ -185,6 +185,49 @@ impl VmClient {
         name
     }
 
+    /// User-initiated login with a short throttle (for keybind actions).
+    /// Returns true when the pipe is open afterwards.
+    fn ensure_login_for_action(&mut self) -> bool {
+        self.ensure_loaded();
+        if self.dll_missing || self.f_login.is_none() {
+            return false;
+        }
+        if self.logged_in {
+            return true;
+        }
+        let recent = self
+            .last_login
+            .map(|t| std::time::Instant::now().duration_since(t).as_millis() < 300)
+            .unwrap_or(false);
+        if recent {
+            return false;
+        }
+        self.try_login_now()
+    }
+
+    /// Write a raw float value. Returns true on success, false silently
+    /// on any failure (server gone -> pipe dropped for poll() to retry).
+    pub fn set_raw(&mut self, vm_param: &str, value: f32) -> bool {
+        if !self.ensure_login_for_action() {
+            return false;
+        }
+        let f_set = match self.f_set {
+            Some(f) => f,
+            None => return false,
+        };
+        // Need a valid read path too (else DLL half-loaded).
+        if self.f_get.is_none() {
+            return false;
+        }
+        let mut name = Self::ansi_param(vm_param);
+        let rep = unsafe { f_set(name.as_mut_ptr(), value) };
+        if rep == -2 {
+            self.do_logout();
+            return false;
+        }
+        rep == 0
+    }
+
     /// Flip a 0/1 button parameter (e.g. Strip[0].B2): reads the current
     /// value and writes back the inverse. Silent on any failure; the next
     /// poll() shows the resulting state. Toggle is symmetric, so `invert`

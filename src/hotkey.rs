@@ -14,7 +14,7 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::{MouseBtn, ToggleKey};
-use crate::window::{WM_KEY_CAPTURED, WM_TOGGLE_REQ};
+use crate::window::{WM_KEY_CAPTURED, WM_KEY_DOWN, WM_KEY_UP};
 
 /// wParam kind for WM_KEY_CAPTURED.
 pub const CAP_CANCEL: usize = 0;
@@ -26,6 +26,10 @@ static mut HOOK_MS: Option<HHOOK> = None;
 static mut TARGET: HWND = HWND(std::ptr::null_mut());
 static mut BIND: ToggleKey = ToggleKey::None;
 static mut CAPTURING: bool = false;
+// True between a matched key-down and its key-up. Suppresses keyboard
+// auto-repeat (holding a key re-fires WM_KEYDOWN) so a hold is one
+// down/up pair, and a toggle fires once per press.
+static mut DOWN_ACTIVE: bool = false;
 
 fn target() -> HWND {
     unsafe { TARGET }
@@ -55,13 +59,16 @@ pub fn shutdown() {
             let _ = UnhookWindowsHookEx(h);
         }
         CAPTURING = false;
+        DOWN_ACTIVE = false;
     }
 }
 
 /// Refresh the shadow bind after cfg changes (called from wndproc only).
+/// Resets the down tracker so a bind change mid-hold cannot stick it.
 pub fn set_bind(bind: ToggleKey) {
     unsafe {
         BIND = bind;
+        DOWN_ACTIVE = false;
     }
 }
 
@@ -75,9 +82,25 @@ pub fn is_capturing() -> bool {
     unsafe { CAPTURING }
 }
 
-fn post_toggle() {
+fn post_down(kind: usize, code: usize) {
     unsafe {
-        let _ = PostMessageW(Some(target()), WM_TOGGLE_REQ, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(
+            Some(target()),
+            WM_KEY_DOWN,
+            WPARAM(kind),
+            LPARAM(code as isize),
+        );
+    }
+}
+
+fn post_up(kind: usize, code: usize) {
+    unsafe {
+        let _ = PostMessageW(
+            Some(target()),
+            WM_KEY_UP,
+            WPARAM(kind),
+            LPARAM(code as isize),
+        );
     }
 }
 
@@ -114,7 +137,21 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
                     post_capture(CAP_KEY, vk as usize);
                 }
             } else if matches(BIND, CAP_KEY, vk as usize) {
-                post_toggle();
+                // Suppress auto-repeat: one press = one down.
+                if !DOWN_ACTIVE {
+                    DOWN_ACTIVE = true;
+                    post_down(CAP_KEY, vk as usize);
+                }
+            }
+        } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+            // Key-up is ignored while capturing (capture is down-only).
+            if !CAPTURING {
+                let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                let vk = info.vkCode as u16;
+                if matches(BIND, CAP_KEY, vk as usize) {
+                    DOWN_ACTIVE = false;
+                    post_up(CAP_KEY, vk as usize);
+                }
             }
         }
     }
@@ -122,31 +159,51 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
     CallNextHookEx(None, ncode, wparam, lparam)
 }
 
+fn xbutton_from_lparam(lparam: LPARAM) -> Option<MouseBtn> {
+    unsafe {
+        let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        let x = ((info.mouseData >> 16) & 0xFFFF) as u16;
+        if x == 1 {
+            Some(MouseBtn::X1)
+        } else if x == 2 {
+            Some(MouseBtn::X2)
+        } else {
+            None
+        }
+    }
+}
+
 unsafe extern "system" fn ms_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode >= 0 {
         let msg = wparam.0 as u32;
-        let btn: Option<MouseBtn> = match msg {
+        // Split down vs up; X-button id comes from mouseData for both.
+        let down_btn: Option<MouseBtn> = match msg {
             WM_LBUTTONDOWN => Some(MouseBtn::Left),
             WM_RBUTTONDOWN => Some(MouseBtn::Right),
             WM_MBUTTONDOWN => Some(MouseBtn::Middle),
-            WM_XBUTTONDOWN => {
-                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-                let x = ((info.mouseData >> 16) & 0xFFFF) as u16;
-                if x == 1 {
-                    Some(MouseBtn::X1)
-                } else if x == 2 {
-                    Some(MouseBtn::X2)
-                } else {
-                    None
-                }
-            }
+            WM_XBUTTONDOWN => xbutton_from_lparam(lparam),
             _ => None,
         };
-        if let Some(b) = btn {
+        let up_btn: Option<MouseBtn> = match msg {
+            WM_LBUTTONUP => Some(MouseBtn::Left),
+            WM_RBUTTONUP => Some(MouseBtn::Right),
+            WM_MBUTTONUP => Some(MouseBtn::Middle),
+            WM_XBUTTONUP => xbutton_from_lparam(lparam),
+            _ => None,
+        };
+        if let Some(b) = down_btn {
             if CAPTURING {
                 post_capture(CAP_MOUSE, b.id() as usize);
             } else if matches(BIND, CAP_MOUSE, b.id() as usize) {
-                post_toggle();
+                if !DOWN_ACTIVE {
+                    DOWN_ACTIVE = true;
+                    post_down(CAP_MOUSE, b.id() as usize);
+                }
+            }
+        } else if let Some(b) = up_btn {
+            if !CAPTURING && matches(BIND, CAP_MOUSE, b.id() as usize) {
+                DOWN_ACTIVE = false;
+                post_up(CAP_MOUSE, b.id() as usize);
             }
         }
     }

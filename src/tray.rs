@@ -3,7 +3,7 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TriggerMode};
 use crate::vm::MicState;
 use crate::window::{to_wide, WM_TRAY};
 
@@ -20,10 +20,15 @@ pub const ID_RELOAD_CFG: u32 = 1501;
 pub const ID_QUIT: u32 = 1502;
 pub const ID_TOGGLE_SET: u32 = 1600;
 pub const ID_TOGGLE_CLEAR: u32 = 1601;
+pub const ID_TRIGGER_TOGGLE: u32 = 1610;
+pub const ID_TRIGGER_HOLD: u32 = 1611;
+pub const ID_TRIGGER_BOTH: u32 = 1612;
+pub const ID_HOLDMS_BASE: u32 = 1620; // +0..3 -> 200,300,500,800 ms
 
 pub const SIZES: [u32; 6] = [24, 32, 48, 64, 96, 128];
 pub const OPACITIES: [u32; 9] = [100, 90, 80, 70, 60, 50, 40, 30, 20];
 pub const BUTTONS: [&str; 9] = ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "Mute"];
+pub const HOLD_TAPS: [u32; 4] = [200, 300, 500, 800];
 
 const TRAY_UID: u32 = 1;
 
@@ -240,7 +245,8 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
         }
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 
-        // Mic toggle keybind (flips the configured vm_param via API).
+        // Mic toggle keybind (flips the configured vm_param via API,
+        // or push-to-talk when Trigger mode is Hold/Both).
         append_text(
             hmenu,
             0xFFFE,
@@ -258,6 +264,70 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
                 MF_STRING
             },
         );
+        // Trigger mode submenu: Toggle / Hold / Both.
+        let htrig = CreatePopupMenu().unwrap_or_default();
+        append_text(
+            htrig,
+            ID_TRIGGER_TOGGLE,
+            "Toggle (press)",
+            if cfg.trigger_mode == TriggerMode::Toggle {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
+        );
+        append_text(
+            htrig,
+            ID_TRIGGER_HOLD,
+            "Hold (push-to-talk)",
+            if cfg.trigger_mode == TriggerMode::Hold {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
+        );
+        append_text(
+            htrig,
+            ID_TRIGGER_BOTH,
+            "Both (tap toggle, hold PTT)",
+            if cfg.trigger_mode == TriggerMode::Both {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
+        );
+        {
+            let w = to_wide("Trigger mode");
+            let _ = AppendMenuW(hmenu, MF_POPUP, htrig.0 as usize, PCWSTR(w.as_ptr()));
+        }
+        // Hold tap threshold submenu (only used by Both mode).
+        let hhold = CreatePopupMenu().unwrap_or_default();
+        if !HOLD_TAPS.contains(&cfg.hold_tap_ms) {
+            append_text(
+                hhold,
+                0xFFFD,
+                &format!("Custom: {} ms", cfg.hold_tap_ms),
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
+            );
+            let _ = AppendMenuW(hhold, MF_SEPARATOR, 0, None);
+        }
+        for (i, ms) in HOLD_TAPS.iter().enumerate() {
+            let checked = *ms == cfg.hold_tap_ms;
+            append_text(
+                hhold,
+                ID_HOLDMS_BASE + i as u32,
+                &format!("{} ms", ms),
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
+            );
+        }
+        {
+            let w = to_wide("Hold tap threshold");
+            let _ = AppendMenuW(hmenu, MF_POPUP, hhold.0 as usize, PCWSTR(w.as_ptr()));
+        }
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 
         append_text(hmenu, ID_OPEN_CFG, "Open config file", MF_STRING);

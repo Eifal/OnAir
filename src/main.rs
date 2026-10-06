@@ -16,7 +16,7 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
-use config::{AppConfig, MouseBtn, ToggleKey};
+use config::{AppConfig, MouseBtn, ToggleKey, TriggerMode};
 use vm::{MicState, VmClient};
 use window::{apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect};
 
@@ -32,6 +32,11 @@ struct AppState {
     tick: u32,
     tray_icon: Option<HICON>,
     capture_until: Option<std::time::Instant>,
+    // Hold-to-talk tracking: true between a matched key-down and key-up.
+    hold_held: bool,
+    // Display state saved on key-down (true=ON/green, false=OFF/red).
+    hold_saved_on: Option<bool>,
+    hold_down_at: Option<std::time::Instant>,
 }
 
 static mut APP: Option<AppState> = None;
@@ -133,6 +138,153 @@ fn do_toggle() {
     do_poll_and_update();
 }
 
+/// Raw value that renders as display ON/OFF (accounts for `invert`,
+/// which is display-only).
+fn raw_for_display(display_on: bool, invert: bool) -> f32 {
+    let on_raw = if invert { 0.0 } else { 1.0 };
+    if display_on { on_raw } else { 1.0 - on_raw }
+}
+
+/// Key-down in Hold/Both mode: save the current display state and force
+/// mic ON (push-to-talk). Ignores repeats (already held) and Unknown
+/// state. Silent on any VM failure (tracking is still set so the
+/// matching key-up is consumed cleanly).
+fn do_hold_down() {
+    if app_mut().hold_held {
+        return; // auto-repeat guard (backup for the hook-side filter)
+    }
+    if app_mut().cfg.toggle_key.is_none() {
+        return;
+    }
+    let saved_on = match app_mut().mic {
+        MicState::On => Some(true),
+        MicState::Off => Some(false),
+        MicState::Unknown(_) => None,
+    };
+    let Some(saved) = saved_on else {
+        return; // Voicemeeter unreachable: don't latch a hold
+    };
+    {
+        let a = app_mut();
+        a.hold_held = true;
+        a.hold_saved_on = Some(saved);
+        a.hold_down_at = Some(std::time::Instant::now());
+    }
+    let (param, invert) = {
+        let a = app_mut();
+        (a.cfg.vm_param.clone(), a.cfg.invert)
+    };
+    app_mut().vm.set_raw(&param, raw_for_display(true, invert));
+    do_poll_and_update();
+}
+
+/// Key-up in Hold mode: restore the state saved on key-down.
+fn do_hold_up_restore() {
+    if !app_mut().hold_held {
+        return;
+    }
+    let (param, invert, saved) = {
+        let a = app_mut();
+        let s = a.hold_saved_on;
+        a.hold_held = false;
+        a.hold_saved_on = None;
+        a.hold_down_at = None;
+        (a.cfg.vm_param.clone(), a.cfg.invert, s)
+    };
+    if let Some(saved_on) = saved {
+        app_mut().vm.set_raw(&param, raw_for_display(saved_on, invert));
+        do_poll_and_update();
+    }
+}
+
+/// Key-up in Both mode: tap (< hold_tap_ms) toggles from the saved state,
+/// longer hold restores it (momentary).
+fn do_hold_up_both() {
+    if !app_mut().hold_held {
+        return;
+    }
+    let (param, invert, saved, thresh) = {
+        let a = app_mut();
+        let dur_ms = a
+            .hold_down_at
+            .map(|t| std::time::Instant::now().duration_since(t).as_millis() as u64)
+            .unwrap_or(u64::MAX);
+        let s = a.hold_saved_on;
+        let th = a.cfg.hold_tap_ms as u64;
+        a.hold_held = false;
+        a.hold_saved_on = None;
+        a.hold_down_at = None;
+        (a.cfg.vm_param.clone(), a.cfg.invert, s, (dur_ms, th))
+    };
+    let (dur_ms, thresh_ms) = thresh;
+    if let Some(saved_on) = saved {
+        let target_on = if dur_ms < thresh_ms {
+            !saved_on // tap: toggle
+        } else {
+            saved_on // hold: momentary, restore
+        };
+        app_mut()
+            .vm
+            .set_raw(&param, raw_for_display(target_on, invert));
+        do_poll_and_update();
+    }
+}
+
+/// Clear hold tracking without touching Voicemeeter (used on config
+/// reload where the param itself may have changed).
+fn reset_hold_tracking() {
+    let a = app_mut();
+    a.hold_held = false;
+    a.hold_saved_on = None;
+    a.hold_down_at = None;
+}
+
+/// If a hold is active, restore the saved state first (used before the
+/// bind/mode changes so the mic never sticks ON).
+fn restore_hold_if_held() {
+    if !app_mut().hold_held {
+        return;
+    }
+    // Both and Hold restore identically here: the mode is about to change,
+    // so treat the release as a long hold (back to saved).
+    do_hold_up_restore();
+}
+
+/// Check an incoming WM_KEY_DOWN/UP against the current bind (guards
+/// against stale queued messages after the bind changed).
+fn key_event_matches(kind: usize, code: usize) -> bool {
+    let bind = app_mut().cfg.toggle_key;
+    match bind {
+        ToggleKey::None => false,
+        ToggleKey::Key(vk) => kind == hotkey::CAP_KEY && code == vk as usize,
+        ToggleKey::Mouse(b) => kind == hotkey::CAP_MOUSE && code == b.id() as usize,
+    }
+}
+
+fn on_key_down(kind: usize, code: usize) {
+    if !key_event_matches(kind, code) {
+        return;
+    }
+    match app_mut().cfg.trigger_mode {
+        TriggerMode::Toggle => do_toggle(),
+        TriggerMode::Hold | TriggerMode::Both => do_hold_down(),
+    }
+}
+
+fn on_key_up(kind: usize, code: usize) {
+    if !key_event_matches(kind, code) {
+        // Stale up for a previous bind: drop any latch so the next
+        // press starts clean. No VM write (bind already changed).
+        reset_hold_tracking();
+        return;
+    }
+    match app_mut().cfg.trigger_mode {
+        TriggerMode::Toggle => {}
+        TriggerMode::Hold => do_hold_up_restore(),
+        TriggerMode::Both => do_hold_up_both(),
+    }
+}
+
 fn begin_capture() {
     hotkey::set_capturing(true);
     app_mut().capture_until =
@@ -156,6 +308,9 @@ fn cancel_capture() {
 
 fn apply_all_after_config_change() {
     // Called after reload or menu change affecting geometry/styles.
+    // Any in-flight hold is dropped (no VM write: the param itself may
+    // have changed, the next poll shows the truth).
+    reset_hold_tracking();
     let (hwnd, x, y, size, locked, topmost, poll_ms) = {
         let a = app_mut();
         (a.hwnd, a.cfg.x, a.cfg.y, a.cfg.size, a.cfg.locked, a.cfg.always_on_top, a.cfg.poll_ms)
@@ -380,11 +535,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         m if m == window::WM_TOGGLE_REQ => {
-            // Global toggle keybind matched (event already passed through
-            // to the system by the hook proc).
-            if !app_mut().cfg.toggle_key.is_none() {
+            // Legacy single-shot toggle message (hooks now send
+            // WM_KEY_DOWN/UP instead; kept so any queued message still
+            // behaves like a press in Toggle mode).
+            if !app_mut().cfg.toggle_key.is_none()
+                && matches!(app_mut().cfg.trigger_mode, TriggerMode::Toggle)
+            {
                 do_toggle();
             }
+            LRESULT(0)
+        }
+        m if m == window::WM_KEY_DOWN => {
+            // Global bind pressed (event already passed through to the
+            // system by the hook proc).
+            on_key_down(wparam.0, lparam.0 as usize);
+            LRESULT(0)
+        }
+        m if m == window::WM_KEY_UP => {
+            // Global bind released.
+            on_key_up(wparam.0, lparam.0 as usize);
             LRESULT(0)
         }
         m if m == window::WM_KEY_CAPTURED => {
@@ -479,16 +648,39 @@ fn handle_command(hwnd: HWND, id: u32) {
         return;
     }
     if id == ID_TOGGLE_SET {
+        // Don't let a hold stick ON across re-binding.
+        restore_hold_if_held();
         begin_capture();
         return;
     }
     if id == ID_TOGGLE_CLEAR {
+        restore_hold_if_held();
         hotkey::set_capturing(false);
         app_mut().capture_until = None;
         app_mut().cfg.toggle_key = ToggleKey::None;
         hotkey::set_bind(ToggleKey::None);
         let _ = app_mut().cfg.save();
         refresh_tray();
+        return;
+    }
+    if id == ID_TRIGGER_TOGGLE || id == ID_TRIGGER_HOLD || id == ID_TRIGGER_BOTH {
+        restore_hold_if_held();
+        app_mut().cfg.trigger_mode = match id {
+            ID_TRIGGER_HOLD => TriggerMode::Hold,
+            ID_TRIGGER_BOTH => TriggerMode::Both,
+            _ => TriggerMode::Toggle,
+        };
+        let _ = app_mut().cfg.save();
+        refresh_tray();
+        return;
+    }
+    if (ID_HOLDMS_BASE..ID_HOLDMS_BASE + 4).contains(&id) {
+        let idx = (id - ID_HOLDMS_BASE) as usize;
+        if let Some(&ms) = HOLD_TAPS.get(idx) {
+            app_mut().cfg.hold_tap_ms = ms;
+            let _ = app_mut().cfg.save();
+            refresh_tray();
+        }
         return;
     }
     if (ID_SIZE_BASE..ID_SIZE_BASE + 6).contains(&id) {
@@ -624,6 +816,9 @@ fn main() {
             tick: 0,
             tray_icon: None,
             capture_until: None,
+            hold_held: false,
+            hold_saved_on: None,
+            hold_down_at: None,
         });
 
         // First poll + paint before showing (avoids gray flash when VM running? still gray on miss)

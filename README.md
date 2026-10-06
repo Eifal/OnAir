@@ -64,6 +64,8 @@ Left and right click both open the menu:
 - Mic toggle keybind (see below):
   - `Toggle key: <name>` (current bind, informational)
   - Set toggle key… / Clear toggle key
+  - Trigger mode: Toggle (press) / Hold (push-to-talk) / Both
+  - Hold tap threshold: 200 / 300 / 500 / 800 ms (Both mode only)
 
 Every change applies immediately, saves `config.ini`, and redraws if needed.
 Position is saved on drag end (`WM_EXITSIZEMOVE`).
@@ -84,14 +86,18 @@ vm_param=Strip[0].B2
 invert=false
 poll_ms=100
 toggle_key=None
+trigger_mode=toggle
+hold_tap_ms=300
 color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
 color_bg=141414
 ```
 
-Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000.
-Colors are 6-digit hex without `#`.
+Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
+`hold_tap_ms` 100–2000. Colors are 6-digit hex without `#`.
+`trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
+`ptt`, `toggle+hold`); unknown falls back to `toggle`.
 
 - `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
   Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.
@@ -119,18 +125,33 @@ Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
 - Writing back: `VBVMR_SetParameterFloat(name, value)`
   (0 OK, -2 no server, -3 unknown parameter) powers the toggle keybind.
 
-## Mic toggle via keybind
+## Mic toggle / hold via keybind
 
-The overlay can flip the configured Voicemeeter button itself: it reads the
-current value and writes back the inverse, so Voicemeeter's own macro button
-is optional.
+The overlay can drive the configured Voicemeeter button itself, so
+Voicemeeter's own macro button is optional. Tray → **Trigger mode**:
+
+- **Toggle (press)** — key/button down flips the parameter permanently.
+- **Hold (push-to-talk)** — while held the mic is forced ON (green),
+  on release it returns to the state saved on key-down.
+- **Both** — tap faster than `hold_tap_ms` toggles, holding longer is
+  momentary (release restores the saved state).
+
+Details:
 
 - Tray → **Set toggle key…** → press any keyboard key or mouse button
   anywhere (Left/Right/Middle/X1/X2 side buttons). Esc cancels, the capture
   also times out after 15 s, and opening the tray menu cancels it.
 - The event is always **passed through**: the key keeps working normally in
-  games/apps AND toggles the mic.
-- Only key-down/button-down fires (holding does not spam, key-up ignored).
+  games/apps AND drives the mic.
+- Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
+  never spams toggles. Key-up is only used by Hold/Both (ignored in Toggle).
+- Hold writes the value that renders as ON (accounts for `invert`), so
+  `invert=true` still gives green while held.
+- If Voicemeeter is unreachable (gray state), holds/toggles are ignored.
+  If you change the parameter manually mid-hold, the release restores the
+  saved state and overwrites that manual change (expected for simple PTT).
+- `hold_tap_ms` (Both only) is configurable via tray
+  (200/300/500/800 ms) or freely in `config.ini` (100–2000, default 300).
 - Coverage is whatever Windows low-level hooks see: keyboard incl. F13–F24,
   plus Mouse Left/Right/Middle/X1/X2. Extra vendor-only gaming buttons are
   invisible to Windows itself and cannot be bound.
