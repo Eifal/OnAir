@@ -1,4 +1,4 @@
-# VM Mic Indicator
+# OnAir
 
 Tiny Windows overlay showing whether one Voicemeeter parameter is ON or OFF.
 
@@ -39,12 +39,13 @@ hand-written `key=value`, Win32 API is used directly (no GUI framework),
 
 Just run the exe. First run:
 
-1. Creates `config.ini` next to the exe (or `%APPDATA%\vm-mic-indicator\config.ini`
-   if the exe folder is not writable).
+1. Creates `config.ini` next to the exe (or `%APPDATA%\onair\config.ini`
+   if the exe folder is not writable; an existing legacy
+   `%APPDATA%\vm-mic-indicator\config.ini` is kept for upgrades).
 2. Starts **unlocked** so you can drag it where you want.
 3. Right-click / left-click the tray icon → check **Lock position**.
 
-Single instance is enforced with a named mutex (`Local\VMMicIndicator`).
+Single instance is enforced with a named mutex (`Local\OnAirOverlay`).
 
 ## Tray menu (the only UI)
 
@@ -171,9 +172,10 @@ Voicemeeter's own macro button is optional. Tray → **Trigger mode**:
 
 Details:
 
-- Tray → **Set toggle key…** → press any keyboard key or mouse button
-  anywhere (Left/Right/Middle/X1/X2 side buttons). Esc cancels, the capture
-  also times out after 15 s, and opening the tray menu cancels it.
+- Tray → **Set toggle key…** → press a keyboard key or mouse button
+  anywhere (Left/Right/Middle/X1/X2 side buttons). Modifier-only presses
+  (Shift/Ctrl/Alt/Win) are ignored, so Ctrl+A binds A. Esc cancels, the
+  capture also times out after 15 s, and opening the tray menu cancels it.
 - The event is always **passed through**: the key keeps working normally in
   games/apps AND drives the mic.
 - Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
@@ -190,16 +192,17 @@ Details:
   invisible to Windows itself and cannot be bound.
 - Technique: `WH_KEYBOARD_LL` + `WH_MOUSE_LL` on our own UI thread (same
   pattern as Discord push-to-talk) — no injection, no game memory access,
-  no admin needed. If hook installation ever fails, the feature silently
-  stays inactive.
+  no admin needed. Hooks are installed only while a bind exists or capture
+  is active; if installation fails, the feature silently stays inactive.
 
 ## Safety / non-goals
 
 - Separate top-most window only, plus low-level input hooks for the optional
   toggle keybind. No hooks into the game, no DLL injection,
   no game-memory reading.
-- No sound, no clickable overlay, no settings window/dialogs, no hotkeys,
-  no autostart, no auto-update, no telemetry, no log files.
+- No sound, no clickable overlay, no settings window/dialogs, no separate
+  hotkey driver or background service, no autostart, no auto-update, no
+  telemetry, no log files. The optional keybind is handled in-process.
 - Windows 10/11 64-bit only.
 
 ## Layout
