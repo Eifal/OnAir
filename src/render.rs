@@ -147,12 +147,7 @@ pub fn draw_overlay(
 }
 
 /// Push pixels to a layered window. `opacity_pct` 20..100 maps to SourceConstantAlpha.
-pub fn update_layered_window(
-    hwnd: HWND,
-    pixels: &[u32],
-    size: u32,
-    opacity_pct: u32,
-) {
+pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct: u32) {
     unsafe {
         let size_i = size as i32;
         // Source DC + 32-bit top-down DIB
@@ -173,17 +168,15 @@ pub fn update_layered_window(
                 biClrUsed: 0,
                 biClrImportant: 0,
             },
-            bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
         };
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbmp = CreateDIBSection(
-            Some(hdc_mem),
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits,
-            None,
-            0,
-        );
+        let hbmp = CreateDIBSection(Some(hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0);
         if hbmp.is_err() {
             if !hdc_mem.is_invalid() {
                 let _ = DeleteDC(hdc_mem);
@@ -208,7 +201,10 @@ pub fn update_layered_window(
             SourceConstantAlpha: alpha,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let size_win = SIZE { cx: size_i, cy: size_i };
+        let size_win = SIZE {
+            cx: size_i,
+            cy: size_i,
+        };
         let pt_src = POINT { x: 0, y: 0 };
 
         let _ = UpdateLayeredWindow(
@@ -254,7 +250,12 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
                 biClrUsed: 0,
                 biClrImportant: 0,
             },
-            bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
         };
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         // Standalone DC not needed for CreateDIBSection; pass None HDC is allowed? Use screen DC.
@@ -262,7 +263,9 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
         let hbm_color = CreateDIBSection(Some(hdc_tmp), &bmi, DIB_RGB_COLORS, &mut bits, None, 0);
         let _ = DeleteDC(hdc_tmp);
         let _ = ReleaseDC(None, hdc_screen);
-        let Ok(hbm_color) = hbm_color else { return None };
+        let Ok(hbm_color) = hbm_color else {
+            return None;
+        };
         if !bits.is_null() {
             std::ptr::copy_nonoverlapping(
                 pixels.as_ptr() as *const u8,

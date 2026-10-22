@@ -396,28 +396,78 @@ impl AppConfig {
             if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let key = k.trim();
             let val = v.trim();
             match key {
-                "x" => if let Ok(n) = val.parse::<i32>() { cfg.x = n; },
-                "y" => if let Ok(n) = val.parse::<i32>() { cfg.y = n; },
-                "size" => if let Ok(n) = val.parse::<u32>() { cfg.size = n; },
-                "opacity" => if let Ok(n) = val.parse::<u32>() { cfg.opacity = n; },
+                "x" => {
+                    if let Ok(n) = val.parse::<i32>() {
+                        cfg.x = n;
+                    }
+                }
+                "y" => {
+                    if let Ok(n) = val.parse::<i32>() {
+                        cfg.y = n;
+                    }
+                }
+                "size" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.size = n;
+                    }
+                }
+                "opacity" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.opacity = n;
+                    }
+                }
                 "locked" => cfg.locked = parse_bool(val, cfg.locked),
                 "always_on_top" => cfg.always_on_top = parse_bool(val, cfg.always_on_top),
-                "vm_param" => if !val.is_empty() { cfg.vm_param = val.to_string(); },
+                "vm_param" => {
+                    if !val.is_empty() {
+                        cfg.vm_param = val.to_string();
+                    }
+                }
                 "invert" => cfg.invert = parse_bool(val, cfg.invert),
-                "poll_ms" => if let Ok(n) = val.parse::<u32>() { cfg.poll_ms = n; },
+                "poll_ms" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.poll_ms = n;
+                    }
+                }
                 "toggle_key" => cfg.toggle_key = parse_toggle_key(val),
                 "trigger_mode" => cfg.trigger_mode = parse_trigger_mode(val),
-                "hold_tap_ms" | "hold_ms" | "tap_ms" => if let Ok(n) = val.parse::<u32>() { cfg.hold_tap_ms = n; },
+                "hold_tap_ms" | "hold_ms" | "tap_ms" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.hold_tap_ms = n;
+                    }
+                }
                 "visual_style" | "visual" | "style" => cfg.visual_style = parse_visual_style(val),
-                "bg_opacity" | "bg_alpha" | "background_opacity" => if let Ok(n) = val.parse::<u32>() { cfg.bg_opacity = n; },
-                "color_on" => if let Some(c) = parse_hex6(val) { cfg.color_on = c; },
-                "color_off" => if let Some(c) = parse_hex6(val) { cfg.color_off = c; },
-                "color_unknown" => if let Some(c) = parse_hex6(val) { cfg.color_unknown = c; },
-                "color_bg" => if let Some(c) = parse_hex6(val) { cfg.color_bg = c; },
+                "bg_opacity" | "bg_alpha" | "background_opacity" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.bg_opacity = n;
+                    }
+                }
+                "color_on" => {
+                    if let Some(c) = parse_hex6(val) {
+                        cfg.color_on = c;
+                    }
+                }
+                "color_off" => {
+                    if let Some(c) = parse_hex6(val) {
+                        cfg.color_off = c;
+                    }
+                }
+                "color_unknown" => {
+                    if let Some(c) = parse_hex6(val) {
+                        cfg.color_unknown = c;
+                    }
+                }
+                "color_bg" => {
+                    if let Some(c) = parse_hex6(val) {
+                        cfg.color_bg = c;
+                    }
+                }
                 // Unknown keys ignored (includes legacy macro_* from v0.3.0).
                 _ => {}
             }
@@ -453,17 +503,32 @@ impl AppConfig {
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
              color_bg={:02X}{:02X}{:02X}\n",
-            self.x, self.y, self.size, self.opacity,
-            self.locked, self.always_on_top,
-            self.vm_param, self.invert, self.poll_ms,
+            self.x,
+            self.y,
+            self.size,
+            self.opacity,
+            self.locked,
+            self.always_on_top,
+            self.vm_param,
+            self.invert,
+            self.poll_ms,
             toggle_key_name(self.toggle_key),
-            self.trigger_mode.as_str(), self.hold_tap_ms,
+            self.trigger_mode.as_str(),
+            self.hold_tap_ms,
             self.visual_style.as_str(),
             self.bg_opacity,
-            self.color_on.0, self.color_on.1, self.color_on.2,
-            self.color_off.0, self.color_off.1, self.color_off.2,
-            self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
-            self.color_bg.0, self.color_bg.1, self.color_bg.2,
+            self.color_on.0,
+            self.color_on.1,
+            self.color_on.2,
+            self.color_off.0,
+            self.color_off.1,
+            self.color_off.2,
+            self.color_unknown.0,
+            self.color_unknown.1,
+            self.color_unknown.2,
+            self.color_bg.0,
+            self.color_bg.1,
+            self.color_bg.2,
         );
         write_atomic(&path, content.as_bytes())
     }
@@ -518,7 +583,10 @@ pub fn parse_hex6(v: &str) -> Option<(u8, u8, u8)> {
 }
 
 fn exe_path() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
 }
 
 fn can_write_to_dir(dir: &Path) -> bool {
@@ -526,7 +594,10 @@ fn can_write_to_dir(dir: &Path) -> bool {
     // Also treat "config.ini already exists and is writable" via same probe.
     let probe = dir.join(".vm-mic-write-test.tmp");
     match std::fs::write(&probe, b"test") {
-        Ok(()) => { let _ = std::fs::remove_file(&probe); true }
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
         Err(_) => false,
     }
 }
@@ -608,7 +679,10 @@ mod tests {
         assert_eq!(parse_toggle_key("space"), ToggleKey::Key(0x20));
         assert_eq!(parse_toggle_key("MouseX1"), ToggleKey::Mouse(MouseBtn::X1));
         assert_eq!(parse_toggle_key("mouse x2"), ToggleKey::Mouse(MouseBtn::X2));
-        assert_eq!(parse_toggle_key("MOUSE_LEFT"), ToggleKey::Mouse(MouseBtn::Left));
+        assert_eq!(
+            parse_toggle_key("MOUSE_LEFT"),
+            ToggleKey::Mouse(MouseBtn::Left)
+        );
         assert_eq!(parse_toggle_key("MouseB4"), ToggleKey::Mouse(MouseBtn::X1));
         assert_eq!(parse_toggle_key("MouseB5"), ToggleKey::Mouse(MouseBtn::X2));
         // Esc is reserved for capture-cancel, never bindable.

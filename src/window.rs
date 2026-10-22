@@ -50,10 +50,7 @@ pub fn clamp_position(x: i32, y: i32, size: u32) -> (i32, i32) {
         if s > vw || s > vh {
             return (40, 40);
         }
-        let inside = x >= vx
-            && y >= vy
-            && x + s <= vx + vw
-            && y + s <= vy + vh;
+        let inside = x >= vx && y >= vy && x + s <= vx + vw && y + s <= vy + vh;
         if inside {
             (x, y)
         } else {
@@ -78,10 +75,7 @@ pub fn nudge_into_view(x: i32, y: i32, size: u32) -> (i32, i32) {
         if s > vw || s > vh {
             return (x, y);
         }
-        (
-            x.clamp(vx, vx + vw - s),
-            y.clamp(vy, vy + vh - s),
-        )
+        (x.clamp(vx, vx + vw - s), y.clamp(vy, vy + vh - s))
     }
 }
 
@@ -102,12 +96,11 @@ pub fn apply_lock(hwnd: HWND, locked: bool) {
             let _ = SetWindowPos(
                 hwnd,
                 None,
-                0, 0, 0, 0,
-                SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOACTIVATE
-                    | SWP_NOZORDER
-                    | SWP_FRAMECHANGED,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
             );
         }
         // Redraw is handled by caller (needs outline change).
@@ -119,7 +112,10 @@ pub fn apply_topmost(hwnd: HWND, on: bool) {
         let _ = SetWindowPos(
             hwnd,
             Some(if on { HWND_TOPMOST } else { HWND_NOTOPMOST }),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     })
@@ -130,8 +126,10 @@ pub fn apply_pos(hwnd: HWND, x: i32, y: i32, size: u32) {
         let _ = SetWindowPos(
             hwnd,
             None,
-            x, y,
-            size as i32, size as i32,
+            x,
+            y,
+            size as i32,
+            size as i32,
             SWP_NOACTIVATE | SWP_NOZORDER,
         );
     })

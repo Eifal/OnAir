@@ -1,7 +1,7 @@
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::PCWSTR;
 
 use crate::config::{AppConfig, TriggerMode, VisualStyle};
 use crate::vm::MicState;
@@ -160,13 +160,21 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
             hmenu,
             ID_LOCK,
             "Lock position",
-            if cfg.locked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+            if cfg.locked {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
         );
         append_text(
             hmenu,
             ID_TOPMOST,
             "Always on top",
-            if cfg.always_on_top { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+            if cfg.always_on_top {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
         );
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 
@@ -178,7 +186,11 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
                 hsize,
                 ID_SIZE_BASE + i as u32,
                 &format!("{} px", s),
-                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
             );
         }
         {
@@ -194,7 +206,11 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
                 hop,
                 ID_OPACITY_BASE + i as u32,
                 &format!("{} %", o),
-                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
             );
         }
         {
@@ -210,7 +226,11 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
                 hvis,
                 ID_VISUAL_BASE + i as u32,
                 label,
-                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
             );
         }
         {
@@ -232,12 +252,20 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         }
         for (i, o) in BG_OPACITIES.iter().enumerate() {
             let checked = *o == cfg.bg_opacity;
-            let label = if *o == 0 { "Transparent (no bg)".to_string() } else { format!("{} %", o) };
+            let label = if *o == 0 {
+                "Transparent (no bg)".to_string()
+            } else {
+                format!("{} %", o)
+            };
             append_text(
                 hbg,
                 ID_BG_BASE + i as u32,
                 &label,
-                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
             );
         }
         {
@@ -287,7 +315,11 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
                 hbtn,
                 ID_BTN_BASE + i as u32,
                 b,
-                if checked { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+                if checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                },
             );
         }
         {
@@ -298,7 +330,11 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
             hvm,
             ID_INVERT,
             "Invert",
-            if cfg.invert { MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0) } else { MF_STRING },
+            if cfg.invert {
+                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+            } else {
+                MF_STRING
+            },
         );
         {
             let w = to_wide("Voicemeeter source");
@@ -311,7 +347,10 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         append_text(
             hmenu,
             0xFFFE,
-            &format!("Toggle key: {}", crate::config::toggle_key_name(cfg.toggle_key)),
+            &format!(
+                "Toggle key: {}",
+                crate::config::toggle_key_name(cfg.toggle_key)
+            ),
             MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
         );
         append_text(hmenu, ID_TOGGLE_SET, "Set toggle key…", MF_STRING);

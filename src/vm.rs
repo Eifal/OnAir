@@ -1,7 +1,7 @@
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::System::Registry::*;
-use windows::core::PCWSTR;
 
 // Verified against official VB-Audio "Voicemeeter Remote API" doc + VoicemeeterRemote.h:
 //   long __stdcall VBVMR_Login(void);            // 0 OK, 1 OK but app not running, <0 error
@@ -76,19 +76,30 @@ impl VmClient {
             let logout = GetProcAddress(h, windows::core::s!("VBVMR_Logout"));
             let dirty = GetProcAddress(h, windows::core::s!("VBVMR_IsParametersDirty"));
             let getf = GetProcAddress(h, windows::core::s!("VBVMR_GetParameterFloat"));
-            let (Some(login), Some(logout), Some(dirty), Some(getf)) = (login, logout, dirty, getf) else {
+            let (Some(login), Some(logout), Some(dirty), Some(getf)) = (login, logout, dirty, getf)
+            else {
                 let _ = FreeLibrary(h);
                 self.dll_missing = true;
                 return;
             };
-            self.f_login = Some(std::mem::transmute::<*const (), FnLogin>(login as *const ()));
-            self.f_logout = Some(std::mem::transmute::<*const (), FnLogout>(logout as *const ()));
-            self.f_dirty = Some(std::mem::transmute::<*const (), FnDirty>(dirty as *const ()));
-            self.f_get = Some(std::mem::transmute::<*const (), FnGetFloat>(getf as *const ()));
+            self.f_login = Some(std::mem::transmute::<*const (), FnLogin>(
+                login as *const (),
+            ));
+            self.f_logout = Some(std::mem::transmute::<*const (), FnLogout>(
+                logout as *const (),
+            ));
+            self.f_dirty = Some(std::mem::transmute::<*const (), FnDirty>(
+                dirty as *const (),
+            ));
+            self.f_get = Some(std::mem::transmute::<*const (), FnGetFloat>(
+                getf as *const (),
+            ));
             // SetParameterFloat is optional: older DLLs always have it, but a
             // missing setter must only disable toggling, never the display.
             if let Some(setf) = GetProcAddress(h, windows::core::s!("VBVMR_SetParameterFloat")) {
-                self.f_set = Some(std::mem::transmute::<*const (), FnSetFloat>(setf as *const ()));
+                self.f_set = Some(std::mem::transmute::<*const (), FnSetFloat>(
+                    setf as *const (),
+                ));
             }
             self.lib = Some(h);
             self.dll_missing = false;
@@ -114,11 +125,10 @@ impl VmClient {
             self.logged_in = false;
             return MicState::Unknown("Voicemeeter not installed".to_string());
         }
-        let (f_login, f_dirty, f_get) =
-            match (self.f_login, self.f_dirty, self.f_get) {
-                (Some(a), Some(b), Some(c)) => (a, b, c),
-                _ => return MicState::Unknown("Voicemeeter not installed".to_string()),
-            };
+        let (f_login, f_dirty, f_get) = match (self.f_login, self.f_dirty, self.f_get) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return MicState::Unknown("Voicemeeter not installed".to_string()),
+        };
 
         // Login at most once per second when not logged in.
         if !self.logged_in {
@@ -158,7 +168,11 @@ impl VmClient {
                 if invert {
                     on = !on;
                 }
-                if on { MicState::On } else { MicState::Off }
+                if on {
+                    MicState::On
+                } else {
+                    MicState::Off
+                }
             }
             -2 => {
                 self.do_logout();
@@ -172,7 +186,9 @@ impl VmClient {
     fn do_logout(&mut self) {
         if self.logged_in {
             if let Some(f) = self.f_logout {
-                unsafe { let _ = f(); }
+                unsafe {
+                    let _ = f();
+                }
             }
         }
         self.logged_in = false;
@@ -181,7 +197,9 @@ impl VmClient {
     /// One immediate login attempt (no throttle). Returns true when the
     /// communication pipe is open afterwards.
     fn try_login_now(&mut self) -> bool {
-        let Some(f_login) = self.f_login else { return false };
+        let Some(f_login) = self.f_login else {
+            return false;
+        };
         self.last_login = Some(std::time::Instant::now());
         let rep = unsafe { f_login() };
         if rep == 0 || rep == 1 {
@@ -284,7 +302,9 @@ impl VmClient {
     pub fn shutdown(&mut self) {
         self.do_logout();
         if let Some(h) = self.lib.take() {
-            unsafe { let _ = FreeLibrary(h); }
+            unsafe {
+                let _ = FreeLibrary(h);
+            }
         }
         self.f_login = None;
         self.f_logout = None;
@@ -306,7 +326,10 @@ pub fn find_dll_path() -> Option<String> {
     // Registry: HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\VB:Voicemeeter {17359A74-1236-5467}
     // value: UninstallString
     if let Some(dir) = read_uninstall_dir() {
-        let cand = format!("{}\\VoicemeeterRemote64.dll", dir.trim_end_matches(['\\', '/']));
+        let cand = format!(
+            "{}\\VoicemeeterRemote64.dll",
+            dir.trim_end_matches(['\\', '/'])
+        );
         if std::path::Path::new(&cand).exists() {
             return Some(cand);
         }
@@ -322,7 +345,10 @@ fn read_uninstall_dir() -> Option<String> {
     unsafe {
         let subkey: Vec<u16> = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\VB:Voicemeeter {17359A74-1236-5467}"
             .encode_utf16().chain(std::iter::once(0)).collect();
-        let value: Vec<u16> = "UninstallString".encode_utf16().chain(std::iter::once(0)).collect();
+        let value: Vec<u16> = "UninstallString"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut hkey = HKEY::default();
         let rc = RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,

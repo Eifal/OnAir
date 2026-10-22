@@ -8,17 +8,19 @@ mod tray;
 mod vm;
 mod window;
 
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::PCWSTR;
 
 use config::{AppConfig, MouseBtn, ToggleKey, TriggerMode};
 use vm::{MicState, VmClient};
-use window::{apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect};
+use window::{
+    apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect,
+};
 
 /// Keybind capture window: Esc cancels, opening the tray menu cancels.
 const CAPTURE_TIMEOUT_MS: u64 = 15_000;
@@ -112,7 +114,9 @@ fn refresh_tray() {
     tray::modify_tray(hwnd, cur_opt, &tip);
     if let Some(o) = old {
         if !o.is_invalid() && o != cur {
-            unsafe { let _ = DestroyIcon(o); }
+            unsafe {
+                let _ = DestroyIcon(o);
+            }
         }
     }
 }
@@ -150,7 +154,11 @@ fn do_toggle() {
 /// which is display-only).
 fn raw_for_display(display_on: bool, invert: bool) -> f32 {
     let on_raw = if invert { 0.0 } else { 1.0 };
-    if display_on { on_raw } else { 1.0 - on_raw }
+    if display_on {
+        on_raw
+    } else {
+        1.0 - on_raw
+    }
 }
 
 /// Key-down in Hold/Both mode: save the current display state and force
@@ -200,7 +208,9 @@ fn do_hold_up_restore() {
         (a.cfg.vm_param.clone(), a.cfg.invert, s)
     };
     if let Some(saved_on) = saved {
-        app_mut().vm.set_raw(&param, raw_for_display(saved_on, invert));
+        app_mut()
+            .vm
+            .set_raw(&param, raw_for_display(saved_on, invert));
         do_poll_and_update();
     }
 }
@@ -322,7 +332,15 @@ fn apply_all_after_config_change() {
     reset_hold_tracking();
     let (hwnd, x, y, size, locked, topmost, poll_ms) = {
         let a = app_mut();
-        (a.hwnd, a.cfg.x, a.cfg.y, a.cfg.size, a.cfg.locked, a.cfg.always_on_top, a.cfg.poll_ms)
+        (
+            a.hwnd,
+            a.cfg.x,
+            a.cfg.y,
+            a.cfg.size,
+            a.cfg.locked,
+            a.cfg.always_on_top,
+            a.cfg.poll_ms,
+        )
     };
     // Reload is not a user-chosen move: keep the live position and only
     // nudge if the new size no longer fits. clamp_position() would teleport
@@ -365,7 +383,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // replace stored icon
             let old = app_mut().tray_icon.replace(ic);
             if let Some(o) = old {
-                if !o.is_invalid() { let _ = DestroyIcon(o); }
+                if !o.is_invalid() {
+                    let _ = DestroyIcon(o);
+                }
             }
         }
         let cur = app_mut().tray_icon.unwrap_or_default();
@@ -517,9 +537,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let tick = unsafe { APP.as_ref().map(|a| a.tick).unwrap_or(0) };
                     if tick >= ticks_needed {
                         app_mut().tick = 0;
-                        let h1 = unsafe {
-                            APP.as_ref().map(|a| a.hwnd).unwrap_or_default()
-                        };
+                        let h1 = unsafe { APP.as_ref().map(|a| a.hwnd).unwrap_or_default() };
                         apply_topmost(h1, true);
                     }
                 }
@@ -538,19 +556,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // NOTIFYICON_VERSION_4: 123 WM_CONTEXTMENU (right),
             // 1024 NIN_SELECT (left). Handle both so the menu opens
             // reliably on all Windows 10/11 builds.
-            if mouse == WM_LBUTTONUP
-                || mouse == WM_RBUTTONUP
-                || mouse == 123
-                || mouse == 1024
-            {
+            if mouse == WM_LBUTTONUP || mouse == WM_RBUTTONUP || mouse == 123 || mouse == 1024 {
                 // Reentrancy guard: some systems deliver two notifications
                 // for one click; never stack two modal menus.
                 static mut IN_MENU: bool = false;
                 if !unsafe { IN_MENU } {
-                    unsafe { IN_MENU = true; }
+                    unsafe {
+                        IN_MENU = true;
+                    }
                     let cfg_c = app_mut().cfg.clone();
                     let cmd = tray::show_menu(hwnd, &cfg_c);
-                    unsafe { IN_MENU = false; }
+                    unsafe {
+                        IN_MENU = false;
+                    }
                     if let Some(id) = cmd {
                         handle_command(hwnd, id);
                     }
@@ -618,10 +636,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Destroy stored icon.
             if let Some(ic) = app_mut().tray_icon.take() {
                 if !ic.is_invalid() {
-                    unsafe { let _ = DestroyIcon(ic); }
+                    unsafe {
+                        let _ = DestroyIcon(ic);
+                    }
                 }
             }
-            unsafe { PostQuitMessage(0); }
+            unsafe {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -638,7 +660,9 @@ fn handle_command(hwnd: HWND, id: u32) {
         // mic can stay ON after the app exits.
         restore_hold_if_held();
         let _ = app_mut().cfg.save();
-        unsafe { let _ = DestroyWindow(hwnd); }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
         return;
     }
     if id == ID_LOCK {
@@ -724,7 +748,10 @@ fn handle_command(hwnd: HWND, id: u32) {
             app_mut().cfg.size = s;
             // Keep position; only nudge minimally to stay on-screen.
             // (Never reset to (40,40) here — that teleport was the bug.)
-            let (x, y) = { let a = app_mut(); (a.cfg.x, a.cfg.y) };
+            let (x, y) = {
+                let a = app_mut();
+                (a.cfg.x, a.cfg.y)
+            };
             let (cx, cy) = nudge_into_view(x, y, s);
             app_mut().cfg.x = cx;
             app_mut().cfg.y = cy;
