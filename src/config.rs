@@ -1,4 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Global toggle keybind. Keyboard uses Win32 virtual-key codes,
 /// mouse covers the five buttons visible to low-level hooks
@@ -350,25 +352,27 @@ impl AppConfig {
     }
 
     pub fn config_path() -> PathBuf {
-        // 1. Try next to exe
-        if let Some(exe_path) = exe_path() {
-            let alongside = exe_path.join("config.ini");
-            if can_write_to_dir(&exe_path) {
-                return alongside;
-            }
-            // If file already exists next to exe (e.g. installed with write once), use it
-            if alongside.exists() {
-                return alongside;
-            }
-        }
-        // 2. Fallback %APPDATA%\vm-mic-indicator\config.ini
-        if let Some(appdata) = appdata_dir() {
-            let dir = appdata.join("vm-mic-indicator");
-            let _ = std::fs::create_dir_all(&dir);
-            return dir.join("config.ini");
-        }
-        // 3. Last resort: current dir
-        PathBuf::from("config.ini")
+        static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
+        CONFIG_PATH
+            .get_or_init(|| {
+                // 1. Try next to exe. If a config already exists there, keep
+                // using it even when the directory is not writable.
+                if let Some(exe_path) = exe_path() {
+                    let alongside = exe_path.join("config.ini");
+                    if alongside.exists() || can_write_to_dir(&exe_path) {
+                        return alongside;
+                    }
+                }
+                // 2. Fallback %APPDATA%\vm-mic-indicator\config.ini
+                if let Some(appdata) = appdata_dir() {
+                    let dir = appdata.join("vm-mic-indicator");
+                    let _ = std::fs::create_dir_all(&dir);
+                    return dir.join("config.ini");
+                }
+                // 3. Last resort: current dir
+                PathBuf::from("config.ini")
+            })
+            .clone()
     }
 
     pub fn load() -> Self {
@@ -454,7 +458,7 @@ impl AppConfig {
             self.color_unknown.0, self.color_unknown.1, self.color_unknown.2,
             self.color_bg.0, self.color_bg.1, self.color_bg.2,
         );
-        std::fs::write(path, content)
+        write_atomic(&path, content.as_bytes())
     }
 
     /// Dot color for current mic state.
@@ -466,6 +470,23 @@ impl AppConfig {
             Unknown(_) => self.color_unknown,
         }
     }
+}
+
+/// Write to a sibling temp file, flush it, then atomically replace the
+/// destination. A crash mid-write leaves the previous config intact.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("ini.tmp");
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn parse_bool(v: &str, fallback: bool) -> bool {
@@ -659,6 +680,27 @@ mod tests {
         assert_eq!(parse_hex6(""), None);
         // Six bytes but only two UTF-8 characters: must not panic.
         assert_eq!(parse_hex6("€€"), None);
+    }
+
+    #[test]
+    fn atomic_save_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "onair-atomic-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.ini");
+        std::fs::write(&path, b"old").unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!dir.join("config.ini.tmp").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
