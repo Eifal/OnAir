@@ -11,6 +11,7 @@
 //!   Extra vendor buttons are invisible to low-level hooks OS-wide.
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::{normalize_vk, MouseBtn, ToggleKey};
@@ -35,12 +36,12 @@ fn target() -> HWND {
     unsafe { TARGET }
 }
 
-/// Install both hooks. Safe to call once at startup; on failure the
-/// toggle feature simply stays inactive (no popups, per robustness rules).
-pub fn init(hwnd: HWND, hinstance: HINSTANCE, bind: ToggleKey) {
+/// Install only the hooks that are not installed yet. Called lazily when a
+/// bind exists or capture starts, so an unbound app has no global hooks.
+fn ensure_hooks() {
     unsafe {
-        TARGET = hwnd;
-        BIND = bind;
+        let module = GetModuleHandleW(None).unwrap_or_default();
+        let hinstance = HINSTANCE(module.0);
         if HOOK_KB.is_none() {
             HOOK_KB = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinstance), 0).ok();
         }
@@ -50,7 +51,7 @@ pub fn init(hwnd: HWND, hinstance: HINSTANCE, bind: ToggleKey) {
     }
 }
 
-pub fn shutdown() {
+fn remove_hooks() {
     unsafe {
         if let Some(h) = HOOK_KB.take() {
             let _ = UnhookWindowsHookEx(h);
@@ -58,8 +59,26 @@ pub fn shutdown() {
         if let Some(h) = HOOK_MS.take() {
             let _ = UnhookWindowsHookEx(h);
         }
-        CAPTURING = false;
         DOWN_ACTIVE = false;
+    }
+}
+
+/// Install hooks only if a bind is configured. Safe to call once at startup;
+/// on failure the toggle feature simply stays inactive (no popups).
+pub fn init(hwnd: HWND, _hinstance: HINSTANCE, bind: ToggleKey) {
+    unsafe {
+        TARGET = hwnd;
+        BIND = bind;
+    }
+    if !bind.is_none() {
+        ensure_hooks();
+    }
+}
+
+pub fn shutdown() {
+    remove_hooks();
+    unsafe {
+        CAPTURING = false;
     }
 }
 
@@ -70,12 +89,29 @@ pub fn set_bind(bind: ToggleKey) {
         BIND = bind;
         DOWN_ACTIVE = false;
     }
+    if bind.is_none() && !is_capturing() {
+        remove_hooks();
+    } else {
+        ensure_hooks();
+    }
 }
 
 pub fn set_capturing(on: bool) {
     unsafe {
         CAPTURING = on;
     }
+    if on {
+        ensure_hooks();
+    } else if unsafe { BIND.is_none() } {
+        remove_hooks();
+    }
+}
+
+/// True for keys that only modify another key (Shift/Ctrl/Alt/Win). Capture
+/// skips their key-down so Ctrl+A binds A instead of Ctrl; otherwise every
+/// keyboard shortcut would be captured as a bare modifier.
+fn is_modifier_vk(vk: u16) -> bool {
+    matches!(normalize_vk(vk), 0x10 | 0x11 | 0x12 | 0x5B | 0x5C)
 }
 
 pub fn is_capturing() -> bool {
@@ -130,10 +166,11 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let vk = normalize_vk(info.vkCode as u16);
             if CAPTURING {
-                // Esc cancels capture and is never bindable.
+                // Esc cancels capture and is never bindable. Pure modifiers
+                // are skipped so a combo such as Ctrl+A captures A.
                 if vk == 0x1B {
                     post_capture(CAP_CANCEL, 0);
-                } else {
+                } else if !is_modifier_vk(vk) {
                     post_capture(CAP_KEY, vk as usize);
                 }
             } else if matches(BIND, CAP_KEY, vk as usize) {
@@ -209,4 +246,19 @@ unsafe extern "system" fn ms_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
     // Pass-through: never swallow, the button keeps working everywhere.
     CallNextHookEx(None, ncode, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pure_modifiers_are_not_capturable() {
+        for vk in [0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5] {
+            assert!(is_modifier_vk(vk), "VK {vk:#04X} should be a modifier");
+        }
+        for vk in [0x1B, 0x20, 0x41, 0x70, 0x7C] {
+            assert!(!is_modifier_vk(vk), "VK {vk:#04X} should be bindable");
+        }
+    }
 }
