@@ -13,7 +13,7 @@
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::config::{MouseBtn, ToggleKey};
+use crate::config::{normalize_vk, MouseBtn, ToggleKey};
 use crate::window::{WM_KEY_CAPTURED, WM_KEY_DOWN, WM_KEY_UP};
 
 /// wParam kind for WM_KEY_CAPTURED.
@@ -128,7 +128,7 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
         let msg = wparam.0 as u32;
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let vk = info.vkCode as u16;
+            let vk = normalize_vk(info.vkCode as u16);
             if CAPTURING {
                 // Esc cancels capture and is never bindable.
                 if vk == 0x1B {
@@ -147,7 +147,7 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
             // Key-up is ignored while capturing (capture is down-only).
             if !CAPTURING {
                 let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                let vk = info.vkCode as u16;
+                let vk = normalize_vk(info.vkCode as u16);
                 if matches(BIND, CAP_KEY, vk as usize) {
                     DOWN_ACTIVE = false;
                     post_up(CAP_KEY, vk as usize);

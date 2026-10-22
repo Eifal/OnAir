@@ -141,6 +141,18 @@ pub fn toggle_key_name(k: ToggleKey) -> String {
     }
 }
 
+/// Map left/right modifier VKs reported by low-level hooks to the generic
+/// VK used by config names. This keeps a captured "Shift" bind stable
+/// across restarts (the hook reports VK_LSHIFT/VK_RSHIFT, not VK_SHIFT).
+pub fn normalize_vk(vk: u16) -> u16 {
+    match vk {
+        0xA0 | 0xA1 => 0x10, // VK_LSHIFT / VK_RSHIFT -> VK_SHIFT
+        0xA2 | 0xA3 => 0x11, // VK_LCONTROL / VK_RCONTROL -> VK_CONTROL
+        0xA4 | 0xA5 => 0x12, // VK_LMENU / VK_RMENU -> VK_MENU
+        _ => vk,
+    }
+}
+
 /// Parse config values like "None", "F13", "A", "5", "Space",
 /// "MouseLeft", "Mouse X1". Unknown/empty (and Esc, reserved for
 /// capture-cancel) fall back to None. Never fails.
@@ -151,6 +163,14 @@ pub fn parse_toggle_key(raw: &str) -> ToggleKey {
         .collect::<String>()
         .to_ascii_uppercase();
     if norm.is_empty() || norm == "NONE" || norm == "OFF" || norm == "DISABLED" {
+        return ToggleKey::None;
+    }
+    // Fallback form emitted by vk_name(), after underscore stripping:
+    // "VK_0xE2" -> "VK0XE2".
+    if let Some(hex) = norm.strip_prefix("VK0X") {
+        if let Ok(vk) = u16::from_str_radix(hex, 16) {
+            return ToggleKey::Key(normalize_vk(vk));
+        }
         return ToggleKey::None;
     }
     if let Some(btn) = norm.strip_prefix("MOUSE") {
@@ -227,6 +247,7 @@ pub fn parse_toggle_key(raw: &str) -> ToggleKey {
 }
 
 fn vk_name(vk: u16) -> String {
+    let vk = normalize_vk(vk);
     if (0x41..=0x5A).contains(&vk) || (0x30..=0x39).contains(&vk) {
         return (vk as u8 as char).to_string();
     }
@@ -495,6 +516,10 @@ mod tests {
             ToggleKey::Key(0x7C), // F13
             ToggleKey::Key(0x20), // Space
             ToggleKey::Key(0x26), // Up
+            ToggleKey::Key(0x10), // Shift (generic)
+            ToggleKey::Key(0x11), // Ctrl (generic)
+            ToggleKey::Key(0x12), // Alt (generic)
+            ToggleKey::Key(0xE2), // unknown VK -> VK_0xE2 fallback
             ToggleKey::Key(0x61), // Num1
             ToggleKey::Key(0x65), // Num5
             ToggleKey::Key(0x6B), // Num+
@@ -507,6 +532,27 @@ mod tests {
         for k in cases {
             assert_eq!(parse_toggle_key(&toggle_key_name(k)), k, "roundtrip {k:?}");
         }
+    }
+
+    #[test]
+    fn modifier_vk_normalization_and_fallback() {
+        // Low-level hooks report left/right modifiers; config names use
+        // the generic VK.
+        assert_eq!(normalize_vk(0xA0), 0x10); // LShift
+        assert_eq!(normalize_vk(0xA1), 0x10); // RShift
+        assert_eq!(normalize_vk(0xA2), 0x11); // LCtrl
+        assert_eq!(normalize_vk(0xA3), 0x11); // RCtrl
+        assert_eq!(normalize_vk(0xA4), 0x12); // LAlt
+        assert_eq!(normalize_vk(0xA5), 0x12); // RAlt
+        assert_eq!(normalize_vk(0x41), 0x41);
+
+        assert_eq!(toggle_key_name(ToggleKey::Key(0xA2)), "Ctrl");
+        assert_eq!(parse_toggle_key("VK_0xA0"), ToggleKey::Key(0x10));
+        assert_eq!(parse_toggle_key("VK0XFF"), ToggleKey::Key(0xFF));
+        assert_eq!(
+            parse_toggle_key(&toggle_key_name(ToggleKey::Key(0xFF))),
+            ToggleKey::Key(0xFF)
+        );
     }
 
     #[test]
