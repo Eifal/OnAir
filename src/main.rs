@@ -31,6 +31,9 @@ struct AppState {
     taskbar_msg: u32,
     tick: u32,
     tray_icon: Option<HICON>,
+    // False until NIM_ADD has run. The first poll happens before the tray
+    // exists, so refresh_tray() must not send NIM_MODIFY yet.
+    tray_ready: bool,
     capture_until: Option<std::time::Instant>,
     // Hold-to-talk tracking: true between a matched key-down and key-up.
     hold_held: bool,
@@ -92,6 +95,9 @@ fn redraw_locked() {
 }
 
 fn refresh_tray() {
+    if !app_mut().tray_ready {
+        return;
+    }
     let (hwnd, cfg_clone, mic_clone, bg) = {
         let a = app_mut();
         (a.hwnd, a.cfg.clone(), a.mic.clone(), a.cfg.color_bg)
@@ -361,6 +367,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         let cur = app_mut().tray_icon.unwrap_or_default();
         tray::add_tray(hwnd, if cur.is_invalid() { None } else { Some(cur) }, &tip);
+        app_mut().tray_ready = true;
         return LRESULT(0);
     }
 
@@ -864,6 +871,7 @@ fn main() {
             taskbar_msg,
             tick: 0,
             tray_icon: None,
+            tray_ready: false,
             capture_until: None,
             hold_held: false,
             hold_saved_on: None,
@@ -881,17 +889,23 @@ fn main() {
         }
         redraw_locked();
 
-        // Tray
+        // Tray. refresh_tray() is disabled until NIM_ADD has run; install
+        // the initial icon here, then enable updates.
         {
             let a = app_mut();
             let dot = a.cfg.dot_color(&a.mic);
             let icon = render::make_tray_icon(dot, a.cfg.color_bg);
             let tip = tray::tooltip_text(&a.cfg, &a.mic);
             if let Some(ic) = icon {
-                a.tray_icon = Some(ic);
+                if let Some(old) = a.tray_icon.replace(ic) {
+                    if !old.is_invalid() {
+                        let _ = DestroyIcon(old);
+                    }
+                }
             }
             let cur = a.tray_icon.unwrap_or_default();
             tray::add_tray(hwnd, if cur.is_invalid() { None } else { Some(cur) }, &tip);
+            a.tray_ready = true;
         }
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);

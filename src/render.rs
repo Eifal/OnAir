@@ -278,8 +278,19 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
                 pixels.len() * 4,
             );
         }
-        // 1bpp mask (all zero = opaque when combined with alpha color bitmap)
-        let hbm_mask = CreateBitmap(dim as i32, dim as i32, 1, 1, None);
+        // 1bpp mask (all zero = opaque when combined with alpha color bitmap).
+        // CreateBitmap with a null bits pointer leaves the mask uninitialized,
+        // which can make the icon render as random garbage; pass zeroed,
+        // word-aligned scanlines explicitly.
+        let mask_stride = ((dim as usize + 15) / 16) * 2;
+        let mask_bits = vec![0u8; mask_stride * dim as usize];
+        let hbm_mask = CreateBitmap(
+            dim as i32,
+            dim as i32,
+            1,
+            1,
+            Some(mask_bits.as_ptr() as *const std::ffi::c_void),
+        );
         let icon_info = ICONINFO {
             fIcon: true.into(),
             xHotspot: 0,
