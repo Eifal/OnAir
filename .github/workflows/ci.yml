@@ -10,12 +10,12 @@ permissions:
 
 jobs:
   test:
-    name: Test, lint, release build
+    name: Test, lint, build, artifact
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test
@@ -24,13 +24,20 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Release build
         run: cargo build --release --locked
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: onair-windows-x64
+          path: target/release/onair.exe
+          if-no-files-found: error
+          retention-days: 14
 
   msrv:
     name: MSRV 1.85
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Test on MSRV
         run: cargo test --locked
