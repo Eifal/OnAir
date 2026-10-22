@@ -363,11 +363,18 @@ impl AppConfig {
                         return alongside;
                     }
                 }
-                // 2. Fallback %APPDATA%\vm-mic-indicator\config.ini
+                // 2. Fallback %APPDATA%\onair\config.ini. Keep using an
+                // existing legacy vm-mic-indicator config so an upgrade does
+                // not silently lose the user's settings.
                 if let Some(appdata) = appdata_dir() {
-                    let dir = appdata.join("vm-mic-indicator");
+                    let legacy = appdata.join("vm-mic-indicator").join("config.ini");
+                    let dir = appdata.join("onair");
+                    let path = dir.join("config.ini");
+                    if !path.exists() && legacy.exists() {
+                        return legacy;
+                    }
                     let _ = std::fs::create_dir_all(&dir);
-                    return dir.join("config.ini");
+                    return path;
                 }
                 // 3. Last resort: current dir
                 PathBuf::from("config.ini")

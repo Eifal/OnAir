@@ -558,17 +558,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        m if m == window::WM_TOGGLE_REQ => {
-            // Legacy single-shot toggle message (hooks now send
-            // WM_KEY_DOWN/UP instead; kept so any queued message still
-            // behaves like a press in Toggle mode).
-            if !app_mut().cfg.toggle_key.is_none()
-                && matches!(app_mut().cfg.trigger_mode, TriggerMode::Toggle)
-            {
-                do_toggle();
-            }
-            LRESULT(0)
-        }
         m if m == window::WM_KEY_DOWN => {
             // Global bind pressed (event already passed through to the
             // system by the hook proc).
@@ -854,7 +843,7 @@ fn main() {
             ex_style |= WS_EX_TRANSPARENT;
         }
 
-        let title = to_wide("VM Mic Indicator");
+        let title = to_wide("OnAir");
         let hwnd = CreateWindowExW(
             ex_style,
             PCWSTR(cls_w.as_ptr()),

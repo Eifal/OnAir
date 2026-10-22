@@ -1,5 +1,5 @@
 [package]
-name = "vm-mic-indicator"
+name = "onair"
 version = "0.2.0"
 edition = "2021"
 description = "OnAir: Voicemeeter mic overlay"

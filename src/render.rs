@@ -60,20 +60,16 @@ pub fn draw_overlay(
             let dist_center = (dx * dx + dy * dy).sqrt();
 
             // Foreground coverage by style.
-            let (fg_cov, use_dot_color) = match style {
+            let fg_cov = match style {
                 VisualStyle::Dot => {
                     let dot_r = s * 0.40; // diameter 80%
-                    ((0.5 - (dist_center - dot_r)).clamp(0.0, 1.0), true)
+                    (0.5 - (dist_center - dot_r)).clamp(0.0, 1.0)
                 }
                 VisualStyle::Ring => {
                     // Ring: outer ~80% diameter, thickness ~10% of size.
                     let r_mid = s * 0.35;
                     let half_thick = s * 0.05;
-                    (
-                        (half_thick + 0.5 - (dist_center - r_mid).abs())
-                            .clamp(0.0, 1.0),
-                        true,
-                    )
+                    (half_thick + 0.5 - (dist_center - r_mid).abs()).clamp(0.0, 1.0)
                 }
                 VisualStyle::Bar => {
                     // Rounded bar SDF.
@@ -84,11 +80,11 @@ pub fn draw_overlay(
                     let b_out = (bax * bax + bay * bay).sqrt();
                     let b_in = bqx.max(bqy).min(0.0);
                     let dist_bar = b_out + b_in - bar_r;
-                    ((0.5 - dist_bar).clamp(0.0, 1.0), true)
+                    (0.5 - dist_bar).clamp(0.0, 1.0)
                 }
                 VisualStyle::Mini => {
                     let mini_r = s * 0.27; // diameter ~54%
-                    ((0.5 - (dist_center - mini_r)).clamp(0.0, 1.0), true)
+                    (0.5 - (dist_center - mini_r)).clamp(0.0, 1.0)
                 }
             };
 
@@ -110,16 +106,12 @@ pub fn draw_overlay(
             }
 
             // fg over bg: out_a = fg_a + bg_a*(1-fg_a)
-            let (fr, fg, fb) = if use_dot_color {
-                (dot.0 as f32, dot.1 as f32, dot.2 as f32)
-            } else {
-                (dot.0 as f32, dot.1 as f32, dot.2 as f32)
-            };
+            let (fr, fgc, fb) = (dot.0 as f32, dot.1 as f32, dot.2 as f32);
             if fg_cov > 0.0 {
                 let out_a = fg_cov + a * (1.0 - fg_cov);
                 if out_a > 0.0001 {
                     r = (fr * fg_cov + r * a * (1.0 - fg_cov)) / out_a;
-                    g = (fg * fg_cov + g * a * (1.0 - fg_cov)) / out_a;
+                    g = (fgc * fg_cov + g * a * (1.0 - fg_cov)) / out_a;
                     b = (fb * fg_cov + b * a * (1.0 - fg_cov)) / out_a;
                 }
                 a = out_a;
@@ -282,7 +274,7 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
         // CreateBitmap with a null bits pointer leaves the mask uninitialized,
         // which can make the icon render as random garbage; pass zeroed,
         // word-aligned scanlines explicitly.
-        let mask_stride = ((dim as usize + 15) / 16) * 2;
+        let mask_stride = (dim as usize).div_ceil(16) * 2;
         let mask_bits = vec![0u8; mask_stride * dim as usize];
         let hbm_mask = CreateBitmap(
             dim as i32,

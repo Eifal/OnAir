@@ -1,10 +1,9 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-pub const CLASS_NAME: &str = "VMMicIndicator";
-pub const MUTEX_NAME: &str = "Local\\VMMicIndicator";
+pub const CLASS_NAME: &str = "OnAirOverlay";
+pub const MUTEX_NAME: &str = "Local\\OnAirOverlay";
 pub const WM_TRAY: u32 = 1024 + 1; // WM_APP + 1
-pub const WM_TOGGLE_REQ: u32 = 1024 + 2; // WM_APP + 2, hotkey matched (legacy, kept for compat)
 pub const WM_KEY_CAPTURED: u32 = 1024 + 3; // WM_APP + 3, capture result
 pub const WM_KEY_DOWN: u32 = 1024 + 4; // WM_APP + 4, bind pressed (wparam=kind, lparam=code)
 pub const WM_KEY_UP: u32 = 1024 + 5; // WM_APP + 5, bind released (wparam=kind, lparam=code)

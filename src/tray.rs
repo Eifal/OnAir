@@ -94,15 +94,15 @@ pub fn remove_tray(hwnd: HWND) {
 
 pub fn tooltip_text(cfg: &AppConfig, state: &MicState) -> String {
     match state {
-        MicState::On => format!("VM Mic Indicator: {} ON", cfg.vm_param),
-        MicState::Off => format!("VM Mic Indicator: {} OFF", cfg.vm_param),
+        MicState::On => format!("OnAir: {} ON", cfg.vm_param),
+        MicState::Off => format!("OnAir: {} OFF", cfg.vm_param),
         MicState::Unknown(reason) => {
             if reason == "Voicemeeter not running" || reason == "Voicemeeter not installed" {
-                "VM Mic Indicator: Voicemeeter not running".to_string()
+                "OnAir: Voicemeeter not running".to_string()
             } else if reason == "Unknown parameter" {
-                format!("VM Mic Indicator: {} unknown parameter", cfg.vm_param)
+                format!("OnAir: {} unknown parameter", cfg.vm_param)
             } else {
-                format!("VM Mic Indicator: {} ?", cfg.vm_param)
+                format!("OnAir: {} ?", cfg.vm_param)
             }
         }
     }
