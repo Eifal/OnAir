@@ -26,11 +26,11 @@ jobs:
         run: cargo build --release --locked
 
   msrv:
-    name: MSRV 1.83
+    name: MSRV 1.85
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Test on MSRV
         run: cargo test --locked

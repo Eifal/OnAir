@@ -20,7 +20,7 @@ layered windows are not composited over exclusive fullscreen), not a bug.
 
 ## Build
 
-Requirements: Rust stable, target `x86_64-pc-windows-msvc`, Windows 10/11.
+Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/11.
 
 ```powershell
 cargo build --release
@@ -31,7 +31,8 @@ Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
 `strip` for minimal size. Idle CPU < 0.1% (single `GetMessageW` loop +
 `SetTimer` polling, redraw only on change), working set ~ <10 MB.
 
-No other dependencies besides the `windows` crate. Config parsing is
+The only runtime dependency is the `windows` crate; `winresource` is
+build-only and embeds the app icon/version metadata. Config parsing is
 hand-written `key=value`, Win32 API is used directly (no GUI framework),
 `#![windows_subsystem = "windows"]` so there is no console window.
 
@@ -209,6 +210,10 @@ Details:
 
 ```
 Cargo.toml
+build.rs       // embeds assets/onair.ico + version metadata
+assets/
+  onair.ico
+LICENSE
 src/
   main.rs      // entry, single instance, message loop, timers, WndProc
   window.rs    // helpers: lock / topmost / pos / clamp / drag via HTCAPTION

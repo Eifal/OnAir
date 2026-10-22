@@ -432,6 +432,13 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
 
         append_text(hmenu, ID_OPEN_CFG, "Open config file", MF_STRING);
         append_text(hmenu, ID_RELOAD_CFG, "Reload config", MF_STRING);
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+        append_text(
+            hmenu,
+            0xFFFB,
+            &format!("OnAir {}", env!("CARGO_PKG_VERSION")),
+            MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
+        );
         append_text(hmenu, ID_QUIT, "Quit", MF_STRING);
 
         let mut pt = POINT::default();
