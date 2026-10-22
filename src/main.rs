@@ -430,6 +430,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe {
                 IN_SIZE_MOVE = false;
             }
+            // May arrive during CreateWindowExW, before APP exists.
+            if unsafe { APP.is_none() } {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
             if let Some((x, y)) = window_rect(hwnd) {
                 let save = {
                     let a = app_mut();
@@ -466,6 +470,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_DISPLAYCHANGE => {
+            // May arrive during window creation, before APP exists.
+            if unsafe { APP.is_none() } {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
             let (x, y, size) = {
                 let a = app_mut();
                 (a.cfg.x, a.cfg.y, a.cfg.size)
