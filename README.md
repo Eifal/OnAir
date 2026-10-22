@@ -24,7 +24,7 @@ Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/1
 
 ```powershell
 cargo build --release
-# exe: target\release\onair.exe  (~160 KB)
+# exe: target\release\onair.exe  (~190 KB; 193,536 bytes)
 ```
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
@@ -72,12 +72,13 @@ Left and right click both open the menu:
   - Hold tap threshold: 200 / 300 / 500 / 800 ms (Both mode only)
 
 Every change applies immediately, saves `config.ini`, and redraws if needed.
-Position is saved on drag end (`WM_EXITSIZEMOVE`).
+Position is adopted on move and saved on drag end (`WM_EXITSIZEMOVE`) and exit.
 
 ## Config (`config.ini`)
 
 `key=value`, one per line, `#` = comment, unknown keys ignored,
-invalid values fall back to defaults. Written only on actual change.
+invalid values fall back to defaults. Written atomically on actual changes
+and on exit.
 
 ```
 x=40
