@@ -324,7 +324,10 @@ fn apply_all_after_config_change() {
         let a = app_mut();
         (a.hwnd, a.cfg.x, a.cfg.y, a.cfg.size, a.cfg.locked, a.cfg.always_on_top, a.cfg.poll_ms)
     };
-    let (cx, cy) = clamp_position(x, y, size);
+    // Reload is not a user-chosen move: keep the live position and only
+    // nudge if the new size no longer fits. clamp_position() would teleport
+    // to (40,40) whenever the window is partly off-screen.
+    let (cx, cy) = nudge_into_view(x, y, size);
     {
         let a = app_mut();
         a.cfg.x = cx;
