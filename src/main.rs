@@ -646,6 +646,10 @@ fn handle_command(hwnd: HWND, id: u32) {
         return;
     }
     if id == ID_INVERT {
+        // Release an active PTT before changing how the raw value is
+        // interpreted; otherwise key-up could write the saved state using
+        // the new invert flag.
+        restore_hold_if_held();
         let v = !app_mut().cfg.invert;
         app_mut().cfg.invert = v;
         let _ = app_mut().cfg.save();
@@ -748,6 +752,9 @@ fn handle_command(hwnd: HWND, id: u32) {
         return;
     }
     if (ID_STRIP_BASE..ID_STRIP_BASE + 8).contains(&id) {
+        // Restore against the currently held parameter before switching
+        // to a different strip.
+        restore_hold_if_held();
         let strip1 = id - ID_STRIP_BASE + 1; // 1-based
         let btn = tray::parse_strip_button(&app_mut().cfg.vm_param)
             .map(|(_, b)| b)
@@ -759,6 +766,8 @@ fn handle_command(hwnd: HWND, id: u32) {
         return;
     }
     if (ID_BTN_BASE..ID_BTN_BASE + 9).contains(&id) {
+        // Restore against the currently held button before switching.
+        restore_hold_if_held();
         let idx = (id - ID_BTN_BASE) as usize;
         if let Some(&b) = BUTTONS.get(idx) {
             let strip0 = tray::parse_strip_button(&app_mut().cfg.vm_param)
