@@ -310,8 +310,9 @@ fn cancel_capture() {
 
 fn apply_all_after_config_change() {
     // Called after reload or menu change affecting geometry/styles.
-    // Any in-flight hold is dropped (no VM write: the param itself may
-    // have changed, the next poll shows the truth).
+    // The caller must release a held PTT before swapping the parameter.
+    // This reset is only a safety net and intentionally performs no VM
+    // write, because the old parameter is no longer available here.
     reset_hold_tracking();
     let (hwnd, x, y, size, locked, topmost, poll_ms) = {
         let a = app_mut();
@@ -585,7 +586,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             handle_command(hwnd, id);
             LRESULT(0)
         }
+        WM_ENDSESSION => {
+            // Windows is ending the session. Release a held PTT before the
+            // process is terminated; WM_DESTROY may not be sent in time.
+            if wparam.0 != 0 {
+                restore_hold_if_held();
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            // Safety net for any destruction path that did not go through
+            // ID_QUIT (for example DefWindowProc handling WM_CLOSE).
+            restore_hold_if_held();
             unsafe {
                 let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
             }
@@ -611,6 +623,9 @@ fn handle_command(hwnd: HWND, id: u32) {
     // the window back to a stale saved position.
     sync_pos_from_window();
     if id == ID_QUIT {
+        // Release a held PTT before destroying the window. Otherwise the
+        // mic can stay ON after the app exits.
+        restore_hold_if_held();
         let _ = app_mut().cfg.save();
         unsafe { let _ = DestroyWindow(hwnd); }
         return;
@@ -644,6 +659,9 @@ fn handle_command(hwnd: HWND, id: u32) {
         return;
     }
     if id == ID_RELOAD_CFG {
+        // Restore against the old parameter before replacing the config;
+        // after the swap we no longer know which parameter was held.
+        restore_hold_if_held();
         let cfg = AppConfig::load();
         app_mut().cfg = cfg;
         apply_all_after_config_change();
