@@ -139,11 +139,16 @@ fn append_text(hmenu: HMENU, id: u32, text: &str, flags: MENU_ITEM_FLAGS) {
     }
 }
 
-pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
+/// Show the tray menu. Returns the selected command ID, or None when the
+/// menu was dismissed. The overlay itself is `WS_EX_NOACTIVATE`, so it cannot
+/// be made foreground for TrackPopupMenu's outside-click dismissal. Use a
+/// tiny hidden helper window as the menu owner instead, then restore the
+/// previous foreground window.
+pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
     unsafe {
         let hmenu = CreatePopupMenu().unwrap_or_default();
         if hmenu.is_invalid() {
-            return;
+            return None;
         }
 
         // Lock / topmost
@@ -388,18 +393,56 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) {
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(
+
+        // A helper window with normal activation semantics. Kept off-screen
+        // and 1x1 so it never paints a visible artifact.
+        let class = to_wide("STATIC");
+        let title = to_wide("");
+        let host = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            PCWSTR(class.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WS_POPUP,
+            -32000,
+            -32000,
+            1,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .ok();
+        let owner = host.unwrap_or(hwnd);
+        let previous = GetForegroundWindow();
+        if host.is_some() {
+            let _ = ShowWindow(owner, SW_SHOWNOACTIVATE);
+            let _ = SetForegroundWindow(owner);
+        }
+
+        let cmd = TrackPopupMenu(
             hmenu,
-            TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+            TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
             pt.x,
             pt.y,
             Some(0),
-            hwnd,
+            owner,
             None,
         );
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(hmenu);
+        if let Some(host) = host {
+            let _ = DestroyWindow(host);
+            if !previous.is_invalid() && previous != host {
+                let _ = SetForegroundWindow(previous);
+            }
+        }
+
+        if cmd.0 == 0 {
+            None
+        } else {
+            Some(cmd.0 as u32)
+        }
     }
 }
 

@@ -538,8 +538,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if !unsafe { IN_MENU } {
                     unsafe { IN_MENU = true; }
                     let cfg_c = app_mut().cfg.clone();
-                    tray::show_menu(hwnd, &cfg_c);
+                    let cmd = tray::show_menu(hwnd, &cfg_c);
                     unsafe { IN_MENU = false; }
+                    if let Some(id) = cmd {
+                        handle_command(hwnd, id);
+                    }
                 }
             }
             LRESULT(0)
