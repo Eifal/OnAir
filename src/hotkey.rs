@@ -231,11 +231,9 @@ unsafe extern "system" fn ms_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
         if let Some(b) = down_btn {
             if CAPTURING {
                 post_capture(CAP_MOUSE, b.id() as usize);
-            } else if matches(BIND, CAP_MOUSE, b.id() as usize) {
-                if !DOWN_ACTIVE {
-                    DOWN_ACTIVE = true;
-                    post_down(CAP_MOUSE, b.id() as usize);
-                }
+            } else if matches(BIND, CAP_MOUSE, b.id() as usize) && !DOWN_ACTIVE {
+                DOWN_ACTIVE = true;
+                post_down(CAP_MOUSE, b.id() as usize);
             }
         } else if let Some(b) = up_btn {
             if !CAPTURING && matches(BIND, CAP_MOUSE, b.id() as usize) {

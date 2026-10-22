@@ -81,14 +81,14 @@ impl VmClient {
                 self.dll_missing = true;
                 return;
             };
-            self.f_login = Some(std::mem::transmute::<_, FnLogin>(login as *const ()));
-            self.f_logout = Some(std::mem::transmute::<_, FnLogout>(logout as *const ()));
-            self.f_dirty = Some(std::mem::transmute::<_, FnDirty>(dirty as *const ()));
-            self.f_get = Some(std::mem::transmute::<_, FnGetFloat>(getf as *const ()));
+            self.f_login = Some(std::mem::transmute::<*const (), FnLogin>(login as *const ()));
+            self.f_logout = Some(std::mem::transmute::<*const (), FnLogout>(logout as *const ()));
+            self.f_dirty = Some(std::mem::transmute::<*const (), FnDirty>(dirty as *const ()));
+            self.f_get = Some(std::mem::transmute::<*const (), FnGetFloat>(getf as *const ()));
             // SetParameterFloat is optional: older DLLs always have it, but a
             // missing setter must only disable toggling, never the display.
             if let Some(setf) = GetProcAddress(h, windows::core::s!("VBVMR_SetParameterFloat")) {
-                self.f_set = Some(std::mem::transmute::<_, FnSetFloat>(setf as *const ()));
+                self.f_set = Some(std::mem::transmute::<*const (), FnSetFloat>(setf as *const ()));
             }
             self.lib = Some(h);
             self.dll_missing = false;

@@ -513,7 +513,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     (a.cfg.always_on_top, a.cfg.poll_ms)
                 };
                 if topmost {
-                    let ticks_needed = ((2000u32 / poll_ms.max(1)).max(1)) as u32;
+                    let ticks_needed = (2000u32 / poll_ms.max(1)).max(1);
                     let tick = unsafe { APP.as_ref().map(|a| a.tick).unwrap_or(0) };
                     if tick >= ticks_needed {
                         app_mut().tick = 0;
@@ -571,7 +571,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         m if m == window::WM_KEY_CAPTURED => {
             if hotkey::is_capturing() {
-                let kind = wparam.0 as usize;
+                let kind = wparam.0;
                 let code = lparam.0 as usize;
                 let key = match kind {
                     hotkey::CAP_KEY => ToggleKey::Key(code as u16),
@@ -789,7 +789,6 @@ fn handle_command(hwnd: HWND, id: u32) {
             do_poll_and_update();
             refresh_tray();
         }
-        return;
     }
 }
 

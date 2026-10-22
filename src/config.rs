@@ -659,6 +659,41 @@ mod tests {
     }
 
     #[test]
+    fn clamp_covers_all_ranges() {
+        let mut cfg = AppConfig {
+            size: 1,
+            opacity: 1,
+            poll_ms: 1,
+            hold_tap_ms: 1,
+            bg_opacity: 101,
+            vm_param: "   ".to_string(),
+            ..Default::default()
+        };
+        cfg.clamp();
+        assert_eq!(cfg.size, 16);
+        assert_eq!(cfg.opacity, 20);
+        assert_eq!(cfg.poll_ms, 30);
+        assert_eq!(cfg.hold_tap_ms, 100);
+        assert_eq!(cfg.bg_opacity, 100);
+        assert_eq!(cfg.vm_param, "Strip[0].B2");
+
+        let mut cfg = AppConfig {
+            size: 9999,
+            opacity: 9999,
+            poll_ms: 9999,
+            hold_tap_ms: 9999,
+            bg_opacity: 9999,
+            ..Default::default()
+        };
+        cfg.clamp();
+        assert_eq!(cfg.size, 512);
+        assert_eq!(cfg.opacity, 100);
+        assert_eq!(cfg.poll_ms, 1000);
+        assert_eq!(cfg.hold_tap_ms, 2000);
+        assert_eq!(cfg.bg_opacity, 100);
+    }
+
+    #[test]
     fn visual_style_parse() {
         assert_eq!(parse_visual_style("dot"), VisualStyle::Dot);
         assert_eq!(parse_visual_style("DOT"), VisualStyle::Dot);

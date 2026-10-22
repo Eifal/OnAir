@@ -49,12 +49,14 @@ pub fn taskbar_created_msg() -> u32 {
 }
 
 fn nid(hwnd: HWND, hicon: Option<HICON>, tip: &str) -> NOTIFYICONDATAW {
-    let mut nid = NOTIFYICONDATAW::default();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = TRAY_UID;
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAY;
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_UID,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: WM_TRAY,
+        ..Default::default()
+    };
     if let Some(ic) = hicon {
         nid.hIcon = ic;
     }
@@ -84,10 +86,12 @@ pub fn modify_tray(hwnd: HWND, hicon: Option<HICON>, tip: &str) {
 
 pub fn remove_tray(hwnd: HWND) {
     unsafe {
-        let mut nid = NOTIFYICONDATAW::default();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = TRAY_UID;
+        let nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_UID,
+            ..Default::default()
+        };
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 }
@@ -464,5 +468,27 @@ pub fn open_config_file() {
             None,
             SW_SHOWNORMAL,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_button_parse() {
+        assert_eq!(
+            parse_strip_button("Strip[0].B2"),
+            Some((1, "B2".to_string()))
+        );
+        assert_eq!(
+            parse_strip_button(" Strip[7].Mute "),
+            Some((8, "Mute".to_string()))
+        );
+        assert_eq!(parse_strip_button("Strip[8].B2"), None);
+        assert_eq!(parse_strip_button("Strip[0].X"), None);
+        assert_eq!(parse_strip_button("Bus[1].Mute"), None);
+        assert_eq!(parse_strip_button("Strip[0]B2"), None);
+        assert_eq!(parse_strip_button(""), None);
     }
 }
