@@ -478,7 +478,11 @@ fn parse_bool(v: &str, fallback: bool) -> bool {
 
 pub fn parse_hex6(v: &str) -> Option<(u8, u8, u8)> {
     let s = v.trim().trim_start_matches('#');
-    if s.len() != 6 { return None; }
+    // Slice by byte below; reject non-ASCII first so a 6-byte UTF-8
+    // string cannot panic on a char boundary.
+    if s.len() != 6 || !s.is_ascii() {
+        return None;
+    }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
@@ -643,6 +647,18 @@ mod tests {
         assert_eq!(VisualStyle::Ring.as_str(), "ring");
         assert_eq!(VisualStyle::Bar.as_str(), "bar");
         assert_eq!(VisualStyle::Mini.as_str(), "mini");
+    }
+
+    #[test]
+    fn hex_color_parsing_is_total() {
+        assert_eq!(parse_hex6("2ECC71"), Some((0x2E, 0xCC, 0x71)));
+        assert_eq!(parse_hex6("#2ecc71"), Some((0x2E, 0xCC, 0x71)));
+        assert_eq!(parse_hex6("  #2ECC71  "), Some((0x2E, 0xCC, 0x71)));
+        assert_eq!(parse_hex6("12345"), None);
+        assert_eq!(parse_hex6("GGGGGG"), None);
+        assert_eq!(parse_hex6(""), None);
+        // Six bytes but only two UTF-8 characters: must not panic.
+        assert_eq!(parse_hex6("€€"), None);
     }
 
     #[test]
