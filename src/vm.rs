@@ -278,14 +278,26 @@ impl VmClient {
             self.do_logout();
         }
     }
-}
-
-impl Drop for VmClient {
-    fn drop(&mut self) {
+    /// Explicitly close the Voicemeeter session and unload the DLL.
+    /// Idempotent; used on shutdown because `APP` is a static and its
+    /// `Drop` impl never runs at process exit.
+    pub fn shutdown(&mut self) {
         self.do_logout();
         if let Some(h) = self.lib.take() {
             unsafe { let _ = FreeLibrary(h); }
         }
+        self.f_login = None;
+        self.f_logout = None;
+        self.f_dirty = None;
+        self.f_get = None;
+        self.f_set = None;
+        self.last_login = None;
+    }
+}
+
+impl Drop for VmClient {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

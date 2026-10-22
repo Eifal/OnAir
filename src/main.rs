@@ -598,6 +598,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Safety net for any destruction path that did not go through
             // ID_QUIT (for example DefWindowProc handling WM_CLOSE).
             restore_hold_if_held();
+            app_mut().vm.shutdown();
             unsafe {
                 let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
             }
@@ -919,6 +920,8 @@ fn main() {
 
         // Save position on exit (in case drag-end save missed)
         if let Some(a) = APP.as_mut() {
+            // Fallback for a WM_QUIT that arrived without WM_DESTROY.
+            a.vm.shutdown();
             if let Some((x, y)) = window_rect(a.hwnd) {
                 a.cfg.x = x;
                 a.cfg.y = y;
