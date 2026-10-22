@@ -31,8 +31,14 @@ pub struct VmClient {
     f_set: Option<FnSetFloat>,
     pub logged_in: bool,
     last_login: Option<std::time::Instant>,
+    last_load_attempt: Option<std::time::Instant>,
     pub dll_missing: bool,
 }
+
+/// How often to retry registry/path/LoadLibrary when Voicemeeter's DLL is
+/// absent. Polling still runs at `poll_ms`, but disk/registry work is
+/// throttled to once per this interval.
+const LOAD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl VmClient {
     pub fn new() -> Self {
@@ -45,6 +51,7 @@ impl VmClient {
             f_set: None,
             logged_in: false,
             last_login: None,
+            last_load_attempt: None,
             dll_missing: false,
         };
         c.try_load();
@@ -52,6 +59,7 @@ impl VmClient {
     }
 
     fn try_load(&mut self) {
+        self.last_load_attempt = Some(std::time::Instant::now());
         let Some(path) = find_dll_path() else {
             self.dll_missing = true;
             return;
@@ -89,7 +97,13 @@ impl VmClient {
 
     fn ensure_loaded(&mut self) {
         if self.lib.is_none() {
-            self.try_load();
+            let due = self
+                .last_load_attempt
+                .map(|t| t.elapsed() >= LOAD_RETRY)
+                .unwrap_or(true);
+            if due {
+                self.try_load();
+            }
         }
     }
 
