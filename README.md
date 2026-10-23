@@ -24,7 +24,7 @@ Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/1
 
 ```powershell
 cargo build --release
-# exe: target\release\onair.exe  (~190 KB; 193,536 bytes)
+# exe: target\release\onair.exe  (~225 KB; 230,400 bytes)
 ```
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
