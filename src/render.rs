@@ -148,8 +148,20 @@ pub fn draw_overlay(
 
 /// Push pixels to a layered window. `opacity_pct` 20..100 maps to SourceConstantAlpha.
 pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct: u32) {
+    update_layered_window_rect(hwnd, pixels, size, size, opacity_pct);
+}
+
+/// Push a non-square premultiplied BGRA bitmap to a layered window.
+pub fn update_layered_window_rect(
+    hwnd: HWND,
+    pixels: &[u32],
+    width: u32,
+    height: u32,
+    opacity_pct: u32,
+) {
     unsafe {
-        let size_i = size as i32;
+        let width_i = width as i32;
+        let height_i = height as i32;
         // Source DC + 32-bit top-down DIB
         let hdc_screen = GetDC(None);
         let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
@@ -157,8 +169,8 @@ pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct:
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size_i,
-                biHeight: -size_i, // top-down
+                biWidth: width_i,
+                biHeight: -height_i, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -186,11 +198,8 @@ pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct:
         }
         let hbmp = hbmp.unwrap();
         if !bits.is_null() {
-            std::ptr::copy_nonoverlapping(
-                pixels.as_ptr() as *const u8,
-                bits as *mut u8,
-                pixels.len() * 4,
-            );
+            let n = (width as usize * height as usize).min(pixels.len());
+            std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, bits as *mut u8, n * 4);
         }
         let h_old = SelectObject(hdc_mem, hbmp.into());
 
@@ -202,8 +211,8 @@ pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct:
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         let size_win = SIZE {
-            cx: size_i,
-            cy: size_i,
+            cx: width_i,
+            cy: height_i,
         };
         let pt_src = POINT { x: 0, y: 0 };
 

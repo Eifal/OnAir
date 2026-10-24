@@ -115,6 +115,32 @@ pub fn parse_visual_style(raw: &str) -> VisualStyle {
     }
 }
 
+/// Tray menu presentation. Glass is the custom acrylic menu; Native keeps
+/// the exact Win32 menu as a fallback and for accessibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuStyle {
+    Glass,
+    Native,
+}
+
+impl MenuStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MenuStyle::Glass => "glass",
+            MenuStyle::Native => "native",
+        }
+    }
+}
+
+/// Parse menu_style values. Unknown values fall back to Glass.
+pub fn parse_menu_style(raw: &str) -> MenuStyle {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "native" | "classic" | "win32" | "system" => MenuStyle::Native,
+        // "glass", "acrylic", "blur", "modern", "default" and anything unknown.
+        _ => MenuStyle::Glass,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleKey {
     None,
@@ -308,6 +334,7 @@ pub struct AppConfig {
     pub hold_tap_ms: u32,
     pub visual_style: VisualStyle,
     pub bg_opacity: u32,
+    pub menu_style: MenuStyle,
     pub color_on: (u8, u8, u8),
     pub color_off: (u8, u8, u8),
     pub color_unknown: (u8, u8, u8),
@@ -331,6 +358,7 @@ impl Default for AppConfig {
             hold_tap_ms: 300,
             visual_style: VisualStyle::Dot,
             bg_opacity: 90,
+            menu_style: MenuStyle::Glass,
             color_on: (0x2E, 0xCC, 0x71),
             color_off: (0xE7, 0x4C, 0x3C),
             color_unknown: (0x80, 0x80, 0x80),
@@ -448,6 +476,7 @@ impl AppConfig {
                         cfg.bg_opacity = n;
                     }
                 }
+                "menu_style" | "tray_menu_style" | "menu" => cfg.menu_style = parse_menu_style(val),
                 "color_on" => {
                     if let Some(c) = parse_hex6(val) {
                         cfg.color_on = c;
@@ -499,6 +528,7 @@ impl AppConfig {
              hold_tap_ms={}\n\
              visual_style={}\n\
              bg_opacity={}\n\
+             menu_style={}\n\
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
@@ -517,6 +547,7 @@ impl AppConfig {
             self.hold_tap_ms,
             self.visual_style.as_str(),
             self.bg_opacity,
+            self.menu_style.as_str(),
             self.color_on.0,
             self.color_on.1,
             self.color_on.2,
@@ -784,6 +815,21 @@ mod tests {
         assert_eq!(VisualStyle::Ring.as_str(), "ring");
         assert_eq!(VisualStyle::Bar.as_str(), "bar");
         assert_eq!(VisualStyle::Mini.as_str(), "mini");
+    }
+
+    #[test]
+    fn menu_style_parse() {
+        assert_eq!(parse_menu_style("glass"), MenuStyle::Glass);
+        assert_eq!(parse_menu_style("acrylic"), MenuStyle::Glass);
+        assert_eq!(parse_menu_style("native"), MenuStyle::Native);
+        assert_eq!(parse_menu_style("CLASSIC"), MenuStyle::Native);
+        assert_eq!(parse_menu_style("system"), MenuStyle::Native);
+        // Unknown values and the default alias never fail.
+        assert_eq!(parse_menu_style("default"), MenuStyle::Glass);
+        assert_eq!(parse_menu_style(""), MenuStyle::Glass);
+        assert_eq!(parse_menu_style("garbage"), MenuStyle::Glass);
+        assert_eq!(MenuStyle::Glass.as_str(), "glass");
+        assert_eq!(MenuStyle::Native.as_str(), "native");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::config::{AppConfig, TriggerMode, VisualStyle};
+use crate::config::{AppConfig, MenuStyle, TriggerMode, VisualStyle};
 use crate::vm::MicState;
 use crate::window::{to_wide, WM_TRAY};
 
@@ -26,6 +26,8 @@ pub const ID_TRIGGER_BOTH: u32 = 1612;
 pub const ID_HOLDMS_BASE: u32 = 1620; // +0..3 -> 200,300,500,800 ms
 pub const ID_VISUAL_BASE: u32 = 1700; // +0..3 -> Dot, Ring, Bar, Mini
 pub const ID_BG_BASE: u32 = 1710; // +0..5 -> bg opacity presets
+pub const ID_MENU_STYLE_GLASS: u32 = 1720;
+pub const ID_MENU_STYLE_NATIVE: u32 = 1721;
 
 pub const SIZES: [u32; 6] = [24, 32, 48, 64, 96, 128];
 pub const OPACITIES: [u32; 9] = [100, 90, 80, 70, 60, 50, 40, 30, 20];
@@ -40,6 +42,225 @@ pub const VISUALS: [(VisualStyle, &str); 4] = [
 ];
 
 const TRAY_UID: u32 = 1;
+
+/// Presentation-independent description of the tray menu. Both the native
+/// menu and the custom glass menu are built from this model, so checks,
+/// disabled states and ordering cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    Action {
+        id: u32,
+        label: String,
+    },
+    Check {
+        id: u32,
+        label: String,
+        checked: bool,
+    },
+    Disabled {
+        label: String,
+    },
+    Separator,
+    Submenu {
+        label: String,
+        items: Vec<Item>,
+    },
+}
+
+impl Item {
+    fn action(id: u32, label: impl Into<String>) -> Self {
+        Item::Action {
+            id,
+            label: label.into(),
+        }
+    }
+
+    fn check(id: u32, label: impl Into<String>, checked: bool) -> Self {
+        Item::Check {
+            id,
+            label: label.into(),
+            checked,
+        }
+    }
+
+    fn disabled(label: impl Into<String>) -> Self {
+        Item::Disabled {
+            label: label.into(),
+        }
+    }
+
+    fn submenu(label: impl Into<String>, items: Vec<Item>) -> Self {
+        Item::Submenu {
+            label: label.into(),
+            items,
+        }
+    }
+}
+
+/// Build the complete menu tree in display order.
+pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
+    let mut root = Vec::new();
+    root.push(Item::check(ID_LOCK, "Lock position", cfg.locked));
+    root.push(Item::check(ID_TOPMOST, "Always on top", cfg.always_on_top));
+    root.push(Item::Separator);
+
+    let sizes: Vec<Item> = SIZES
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Item::check(ID_SIZE_BASE + i as u32, format!("{} px", s), *s == cfg.size))
+        .collect();
+    root.push(Item::submenu("Size", sizes));
+
+    let opacities: Vec<Item> = OPACITIES
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            Item::check(
+                ID_OPACITY_BASE + i as u32,
+                format!("{} %", o),
+                *o == cfg.opacity,
+            )
+        })
+        .collect();
+    root.push(Item::submenu("Opacity", opacities));
+
+    let visuals: Vec<Item> = VISUALS
+        .iter()
+        .enumerate()
+        .map(|(i, (style, label))| {
+            Item::check(
+                ID_VISUAL_BASE + i as u32,
+                *label,
+                *style == cfg.visual_style,
+            )
+        })
+        .collect();
+    root.push(Item::submenu("Visual", visuals));
+
+    let mut backgrounds = Vec::new();
+    if !BG_OPACITIES.contains(&cfg.bg_opacity) {
+        backgrounds.push(Item::disabled(format!("Custom: {} %", cfg.bg_opacity)));
+        backgrounds.push(Item::Separator);
+    }
+    for (i, o) in BG_OPACITIES.iter().enumerate() {
+        let label = if *o == 0 {
+            "Transparent (no bg)".to_string()
+        } else {
+            format!("{} %", o)
+        };
+        backgrounds.push(Item::check(
+            ID_BG_BASE + i as u32,
+            label,
+            *o == cfg.bg_opacity,
+        ));
+    }
+    root.push(Item::submenu("Background", backgrounds));
+
+    let menu_styles = vec![
+        Item::check(
+            ID_MENU_STYLE_GLASS,
+            "Glass (acrylic)",
+            cfg.menu_style == MenuStyle::Glass,
+        ),
+        Item::check(
+            ID_MENU_STYLE_NATIVE,
+            "Native (Win32)",
+            cfg.menu_style == MenuStyle::Native,
+        ),
+    ];
+    root.push(Item::submenu("Menu style", menu_styles));
+    root.push(Item::Separator);
+
+    let parsed = parse_strip_button(&cfg.vm_param);
+    let mut vm = Vec::new();
+    if parsed.is_none() {
+        vm.push(Item::disabled(format!("Custom: {}", cfg.vm_param)));
+        vm.push(Item::Separator);
+    }
+    let cur_strip = parsed.as_ref().map(|(s, _)| *s).unwrap_or(0);
+    let strips: Vec<Item> = (1..=8u32)
+        .map(|n| {
+            Item::check(
+                ID_STRIP_BASE + (n - 1),
+                format!("Strip {}", n),
+                parsed.is_some() && n == cur_strip,
+            )
+        })
+        .collect();
+    vm.push(Item::submenu("Strip", strips));
+    let cur_btn = parsed.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
+    let buttons: Vec<Item> = BUTTONS
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            Item::check(
+                ID_BTN_BASE + i as u32,
+                *b,
+                parsed.is_some() && *b == cur_btn,
+            )
+        })
+        .collect();
+    vm.push(Item::submenu("Button", buttons));
+    vm.push(Item::check(ID_INVERT, "Invert", cfg.invert));
+    root.push(Item::submenu("Voicemeeter source", vm));
+    root.push(Item::Separator);
+
+    root.push(Item::disabled(format!(
+        "Toggle key: {}",
+        crate::config::toggle_key_name(cfg.toggle_key)
+    )));
+    root.push(Item::action(ID_TOGGLE_SET, "Set toggle key…"));
+    if cfg.toggle_key.is_none() {
+        root.push(Item::disabled("Clear toggle key"));
+    } else {
+        root.push(Item::action(ID_TOGGLE_CLEAR, "Clear toggle key"));
+    }
+
+    let triggers = vec![
+        Item::check(
+            ID_TRIGGER_TOGGLE,
+            "Toggle (press)",
+            cfg.trigger_mode == TriggerMode::Toggle,
+        ),
+        Item::check(
+            ID_TRIGGER_HOLD,
+            "Hold (push-to-talk)",
+            cfg.trigger_mode == TriggerMode::Hold,
+        ),
+        Item::check(
+            ID_TRIGGER_BOTH,
+            "Both (tap toggle, hold PTT)",
+            cfg.trigger_mode == TriggerMode::Both,
+        ),
+    ];
+    root.push(Item::submenu("Trigger mode", triggers));
+
+    let mut holds = Vec::new();
+    if !HOLD_TAPS.contains(&cfg.hold_tap_ms) {
+        holds.push(Item::disabled(format!("Custom: {} ms", cfg.hold_tap_ms)));
+        holds.push(Item::Separator);
+    }
+    for (i, ms) in HOLD_TAPS.iter().enumerate() {
+        holds.push(Item::check(
+            ID_HOLDMS_BASE + i as u32,
+            format!("{} ms", ms),
+            *ms == cfg.hold_tap_ms,
+        ));
+    }
+    root.push(Item::submenu("Hold tap threshold", holds));
+    root.push(Item::Separator);
+
+    root.push(Item::action(ID_OPEN_CFG, "Open config file"));
+    root.push(Item::action(ID_RELOAD_CFG, "Reload config"));
+    root.push(Item::Separator);
+    root.push(Item::disabled(format!(
+        "OnAir {}",
+        env!("CARGO_PKG_VERSION")
+    )));
+    root.push(Item::action(ID_QUIT, "Quit"));
+
+    root
+}
 
 pub fn taskbar_created_msg() -> u32 {
     unsafe {
@@ -143,6 +364,37 @@ fn append_text(hmenu: HMENU, id: u32, text: &str, flags: MENU_ITEM_FLAGS) {
     }
 }
 
+fn append_items(hmenu: HMENU, items: &[Item]) {
+    for item in items {
+        match item {
+            Item::Action { id, label } => append_text(hmenu, *id, label, MF_STRING),
+            Item::Check { id, label, checked } => {
+                let flags = if *checked {
+                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
+                } else {
+                    MF_STRING
+                };
+                append_text(hmenu, *id, label, flags);
+            }
+            Item::Disabled { label } => {
+                append_text(hmenu, 0, label, MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0))
+            }
+            Item::Separator => unsafe {
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+            },
+            Item::Submenu { label, items } => unsafe {
+                let hsub = CreatePopupMenu().unwrap_or_default();
+                if hsub.is_invalid() {
+                    continue;
+                }
+                append_items(hsub, items);
+                let w = to_wide(label);
+                let _ = AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, PCWSTR(w.as_ptr()));
+            },
+        }
+    }
+}
+
 /// Show the tray menu. Returns the selected command ID, or None when the
 /// menu was dismissed. The overlay itself is `WS_EX_NOACTIVATE`, so it cannot
 /// be made foreground for TrackPopupMenu's outside-click dismissal. Use a
@@ -154,292 +406,7 @@ pub fn show_menu(hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         if hmenu.is_invalid() {
             return None;
         }
-
-        // Lock / topmost
-        append_text(
-            hmenu,
-            ID_LOCK,
-            "Lock position",
-            if cfg.locked {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        append_text(
-            hmenu,
-            ID_TOPMOST,
-            "Always on top",
-            if cfg.always_on_top {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-
-        // Size submenu
-        let hsize = CreatePopupMenu().unwrap_or_default();
-        for (i, s) in SIZES.iter().enumerate() {
-            let checked = *s == cfg.size;
-            append_text(
-                hsize,
-                ID_SIZE_BASE + i as u32,
-                &format!("{} px", s),
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Size");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hsize.0 as usize, PCWSTR(w.as_ptr()));
-        }
-
-        // Opacity submenu
-        let hop = CreatePopupMenu().unwrap_or_default();
-        for (i, o) in OPACITIES.iter().enumerate() {
-            let checked = *o == cfg.opacity;
-            append_text(
-                hop,
-                ID_OPACITY_BASE + i as u32,
-                &format!("{} %", o),
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Opacity");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hop.0 as usize, PCWSTR(w.as_ptr()));
-        }
-
-        // Visual style submenu (small, non-intrusive overlays)
-        let hvis = CreatePopupMenu().unwrap_or_default();
-        for (i, (style, label)) in VISUALS.iter().enumerate() {
-            let checked = *style == cfg.visual_style;
-            append_text(
-                hvis,
-                ID_VISUAL_BASE + i as u32,
-                label,
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Visual");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hvis.0 as usize, PCWSTR(w.as_ptr()));
-        }
-
-        // Background transparency submenu (bg square only,
-        // foreground dot/ring/bar stays opaque).
-        let hbg = CreatePopupMenu().unwrap_or_default();
-        if !BG_OPACITIES.contains(&cfg.bg_opacity) {
-            append_text(
-                hbg,
-                0xFFFC,
-                &format!("Custom: {} %", cfg.bg_opacity),
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
-            );
-            let _ = AppendMenuW(hbg, MF_SEPARATOR, 0, None);
-        }
-        for (i, o) in BG_OPACITIES.iter().enumerate() {
-            let checked = *o == cfg.bg_opacity;
-            let label = if *o == 0 {
-                "Transparent (no bg)".to_string()
-            } else {
-                format!("{} %", o)
-            };
-            append_text(
-                hbg,
-                ID_BG_BASE + i as u32,
-                &label,
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Background");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hbg.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-
-        // Voicemeeter source submenu
-        let hvm = CreatePopupMenu().unwrap_or_default();
-        let parsed = parse_strip_button(&cfg.vm_param);
-        if parsed.is_none() {
-            // Disabled label "Custom: <param>"
-            append_text(
-                hvm,
-                0xFFFF,
-                &format!("Custom: {}", cfg.vm_param),
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
-            );
-            let _ = AppendMenuW(hvm, MF_SEPARATOR, 0, None);
-        }
-        // Strip submenu (radio)
-        let hstrip = CreatePopupMenu().unwrap_or_default();
-        let cur_strip = parsed.as_ref().map(|(s, _)| *s).unwrap_or(0);
-        for n in 1..=8u32 {
-            append_text(
-                hstrip,
-                ID_STRIP_BASE + (n - 1),
-                &format!("Strip {}", n),
-                if parsed.is_some() && n == cur_strip {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Strip");
-            let _ = AppendMenuW(hvm, MF_POPUP, hstrip.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        // Button submenu (radio)
-        let hbtn = CreatePopupMenu().unwrap_or_default();
-        let cur_btn = parsed.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
-        for (i, b) in BUTTONS.iter().enumerate() {
-            let checked = parsed.is_some() && *b == cur_btn;
-            append_text(
-                hbtn,
-                ID_BTN_BASE + i as u32,
-                b,
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Button");
-            let _ = AppendMenuW(hvm, MF_POPUP, hbtn.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        append_text(
-            hvm,
-            ID_INVERT,
-            "Invert",
-            if cfg.invert {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        {
-            let w = to_wide("Voicemeeter source");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hvm.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-
-        // Mic toggle keybind (flips the configured vm_param via API,
-        // or push-to-talk when Trigger mode is Hold/Both).
-        append_text(
-            hmenu,
-            0xFFFE,
-            &format!(
-                "Toggle key: {}",
-                crate::config::toggle_key_name(cfg.toggle_key)
-            ),
-            MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
-        );
-        append_text(hmenu, ID_TOGGLE_SET, "Set toggle key…", MF_STRING);
-        append_text(
-            hmenu,
-            ID_TOGGLE_CLEAR,
-            "Clear toggle key",
-            if cfg.toggle_key.is_none() {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        // Trigger mode submenu: Toggle / Hold / Both.
-        let htrig = CreatePopupMenu().unwrap_or_default();
-        append_text(
-            htrig,
-            ID_TRIGGER_TOGGLE,
-            "Toggle (press)",
-            if cfg.trigger_mode == TriggerMode::Toggle {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        append_text(
-            htrig,
-            ID_TRIGGER_HOLD,
-            "Hold (push-to-talk)",
-            if cfg.trigger_mode == TriggerMode::Hold {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        append_text(
-            htrig,
-            ID_TRIGGER_BOTH,
-            "Both (tap toggle, hold PTT)",
-            if cfg.trigger_mode == TriggerMode::Both {
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-            } else {
-                MF_STRING
-            },
-        );
-        {
-            let w = to_wide("Trigger mode");
-            let _ = AppendMenuW(hmenu, MF_POPUP, htrig.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        // Hold tap threshold submenu (only used by Both mode).
-        let hhold = CreatePopupMenu().unwrap_or_default();
-        if !HOLD_TAPS.contains(&cfg.hold_tap_ms) {
-            append_text(
-                hhold,
-                0xFFFD,
-                &format!("Custom: {} ms", cfg.hold_tap_ms),
-                MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
-            );
-            let _ = AppendMenuW(hhold, MF_SEPARATOR, 0, None);
-        }
-        for (i, ms) in HOLD_TAPS.iter().enumerate() {
-            let checked = *ms == cfg.hold_tap_ms;
-            append_text(
-                hhold,
-                ID_HOLDMS_BASE + i as u32,
-                &format!("{} ms", ms),
-                if checked {
-                    MENU_ITEM_FLAGS(MF_STRING.0 | MF_CHECKED.0)
-                } else {
-                    MF_STRING
-                },
-            );
-        }
-        {
-            let w = to_wide("Hold tap threshold");
-            let _ = AppendMenuW(hmenu, MF_POPUP, hhold.0 as usize, PCWSTR(w.as_ptr()));
-        }
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-
-        append_text(hmenu, ID_OPEN_CFG, "Open config file", MF_STRING);
-        append_text(hmenu, ID_RELOAD_CFG, "Reload config", MF_STRING);
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-        append_text(
-            hmenu,
-            0xFFFB,
-            &format!("OnAir {}", env!("CARGO_PKG_VERSION")),
-            MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0),
-        );
-        append_text(hmenu, ID_QUIT, "Quit", MF_STRING);
+        append_items(hmenu, &build_model(cfg));
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -520,6 +487,35 @@ pub fn open_config_file() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_model_exposes_menu_style() {
+        let cfg = AppConfig::default();
+        let model = build_model(&cfg);
+        let style = model
+            .iter()
+            .find_map(|item| match item {
+                Item::Submenu { label, items } if label == "Menu style" => Some(items),
+                _ => None,
+            })
+            .expect("Menu style submenu");
+        assert!(style.iter().any(|item| matches!(
+            item,
+            Item::Check {
+                id: ID_MENU_STYLE_GLASS,
+                checked: true,
+                ..
+            }
+        )));
+        assert!(style.iter().any(|item| matches!(
+            item,
+            Item::Check {
+                id: ID_MENU_STYLE_NATIVE,
+                checked: false,
+                ..
+            }
+        )));
+    }
 
     #[test]
     fn strip_button_parse() {

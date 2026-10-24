@@ -58,6 +58,7 @@ Left and right click both open the menu:
 - Opacity: 100 … 20 % (whole window)
 - Visual: Dot / Ring / Bar / Mini (see below)
 - Background: 100 / 90 / 70 / 50 / 30 / Transparent (bg square only)
+- Menu style: Glass (acrylic, default) / Native (Win32)
 - Voicemeeter source:
   - Strip 1–8 (→ `Strip[n-1]`)
   - Button A1–A5, B1–B3, Mute
@@ -95,6 +96,7 @@ trigger_mode=toggle
 hold_tap_ms=300
 visual_style=dot
 bg_opacity=90
+menu_style=glass
 color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
@@ -108,6 +110,8 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 `visual_style` accepts `dot` / `ring` / `bar` / `mini`
 (aliases: `strip`/`pill` → bar, `circle`/`outline` → ring,
 `minimal`/`nobg` → mini); unknown falls back to `dot`.
+`menu_style` accepts `glass` / `native` (aliases: `acrylic`/`blur`/`modern`
+→ glass, `classic`/`win32`/`system` → native); unknown falls back to `glass`.
 
 ## Visual styles (all small, same square hitbox)
 
@@ -135,10 +139,15 @@ Tray icon always stays Dot for recognizability.
 - Tray → **Background** or `config.ini` (`bg_opacity`, aliases
   `bg_alpha`, `background_opacity`).
 
-- `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
-  Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.
-- `invert=true` flips green/red, so parameters with opposite logic
-  (e.g. `Strip[0].Mute = 1` means muted) work correctly.
+## Tray menu style
+
+- `menu_style=glass` (default) draws the custom rounded acrylic menu.
+  If acrylic is unavailable, it falls back to a solid dark translucent panel.
+- `menu_style=native` keeps the exact Win32 system menu, which is also the
+  accessibility fallback. The glass menu falls back to it automatically if
+  its windows cannot be created.
+- Tray → **Menu style** or `config.ini`; the change applies the next time the
+  menu opens.
 
 ## Voicemeeter
 
@@ -160,6 +169,10 @@ Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
   recovers automatically (gray while closed, no crash, no popups).
 - Writing back: `VBVMR_SetParameterFloat(name, value)`
   (0 OK, -2 no server, -3 unknown parameter) powers the toggle keybind.
+- `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
+  Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.
+- `invert=true` flips green/red, so parameters with opposite logic
+  (e.g. `Strip[0].Mute = 1` means muted) work correctly.
 
 ## Mic toggle / hold via keybind
 
@@ -220,7 +233,8 @@ src/
   window.rs    // helpers: lock / topmost / pos / clamp / drag via HTCAPTION
   render.rs    // DIB + SDF rasterizer + UpdateLayeredWindow + tray icon
   vm.rs        // dynamic DLL loading, login, polling, MicState
-  tray.rs      // Shell_NotifyIcon, menu, commands, tooltip
+  tray.rs      // Shell_NotifyIcon, shared menu model, native menu, tooltip
+  glassmenu.rs // custom acrylic tray menu (rendered from tray::build_model)
   config.rs    // load / save / defaults / clamping
   hotkey.rs    // WH_KEYBOARD_LL + WH_MOUSE_LL mic toggle bind + capture
 ```

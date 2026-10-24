@@ -2,6 +2,7 @@
 #![allow(static_mut_refs)]
 
 mod config;
+mod glassmenu;
 mod hotkey;
 mod render;
 mod tray;
@@ -16,7 +17,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use config::{AppConfig, MouseBtn, ToggleKey, TriggerMode};
+use config::{AppConfig, MenuStyle, MouseBtn, ToggleKey, TriggerMode};
 use vm::{MicState, VmClient};
 use window::{
     apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect,
@@ -565,7 +566,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         IN_MENU = true;
                     }
                     let cfg_c = app_mut().cfg.clone();
-                    let cmd = tray::show_menu(hwnd, &cfg_c);
+                    let cmd = if cfg_c.menu_style == MenuStyle::Glass {
+                        glassmenu::show(hwnd, &cfg_c)
+                    } else {
+                        tray::show_menu(hwnd, &cfg_c)
+                    };
                     unsafe {
                         IN_MENU = false;
                     }
@@ -787,6 +792,16 @@ fn handle_command(hwnd: HWND, id: u32) {
             redraw_locked();
             let _ = app_mut().cfg.save();
         }
+        return;
+    }
+    if id == ID_MENU_STYLE_GLASS || id == ID_MENU_STYLE_NATIVE {
+        app_mut().cfg.menu_style = if id == ID_MENU_STYLE_NATIVE {
+            MenuStyle::Native
+        } else {
+            MenuStyle::Glass
+        };
+        let _ = app_mut().cfg.save();
+        refresh_tray();
         return;
     }
     if (ID_STRIP_BASE..ID_STRIP_BASE + 8).contains(&id) {
