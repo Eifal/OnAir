@@ -143,6 +143,8 @@ Tray icon always stays Dot for recognizability.
 
 - `menu_style=glass` (default) draws the custom rounded acrylic menu.
   If acrylic is unavailable, it falls back to a solid dark translucent panel.
+  Windows 11 uses smooth DWM rounded corners; older Windows falls back to a
+  clipped rounded region. No drop shadow is drawn.
 - `menu_style=native` keeps the exact Win32 system menu, which is also the
   accessibility fallback. The glass menu falls back to it automatically if
   its windows cannot be created.

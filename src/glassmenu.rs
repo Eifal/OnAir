@@ -11,6 +11,10 @@ use std::sync::Once;
 
 use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -196,7 +200,9 @@ unsafe fn register_classes() -> bool {
 
     let glass_name = to_wide(GLASS_CLASS);
     let glass = WNDCLASSW {
-        style: CS_DROPSHADOW,
+        // No CS_DROPSHADOW: its rectangular shadow shows under the rounded
+        // acrylic edge (especially on the right and bottom).
+        style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(menu_proc),
         hInstance: hinstance,
         hCursor: cursor,
@@ -775,6 +781,34 @@ unsafe fn apply_region(hwnd: HWND, w: i32, h: i32, radius: i32) {
     }
 }
 
+/// Ask DWM for smooth rounded corners and no system border (Windows 11).
+/// Returns false on older systems, where the caller falls back to a hard
+/// `SetWindowRgn` clip.
+unsafe fn prefer_round_corners(hwnd: HWND) -> bool {
+    let preference = DWMWCP_ROUND;
+    let rounded = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &preference as *const _ as *const std::ffi::c_void,
+        std::mem::size_of_val(&preference) as u32,
+    )
+    .is_ok();
+
+    if rounded {
+        // Windows 11 otherwise paints its own light border on the right and
+        // bottom edges, which looks like a one-sided shadow. Our content
+        // layer already draws a consistent border.
+        let no_border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &no_border as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&no_border) as u32,
+        );
+    }
+    rounded
+}
+
 fn work_area_from_point(pt: POINT) -> RECT {
     unsafe {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -943,7 +977,12 @@ unsafe fn create_menu(
         view_h,
         SWP_NOACTIVATE,
     );
-    apply_region(hwnd, layout.width, view_h, layout.radius);
+    // Windows 11 clips the acrylic with a smooth DWM curve. Only use the
+    // hard-edged region on systems where that attribute is unavailable.
+    let rounded = prefer_round_corners(hwnd);
+    if !rounded {
+        apply_region(hwnd, layout.width, view_h, layout.radius);
+    }
 
     let content_class = to_wide(CONTENT_CLASS);
     let content_name = to_wide("");
@@ -968,7 +1007,8 @@ unsafe fn create_menu(
             return None;
         }
     };
-    apply_region(content, layout.width, view_h, layout.radius);
+    // The content layer is per-pixel-alpha, so it must not get a hard window
+    // region; that would clip the anti-aliased border into stair steps.
 
     let menu = Menu {
         hwnd,
@@ -995,6 +1035,12 @@ unsafe fn create_menu(
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+        // DWM corner rounding is unreliable on a layered fallback window.
+        let (fallback_w, fallback_h, fallback_radius) = {
+            let menu = &s.windows[idx];
+            (menu.layout.width, menu.view_height, menu.layout.radius)
+        };
+        apply_region(hwnd, fallback_w, fallback_h, fallback_radius);
         let _ = SetWindowPos(
             hwnd,
             None,
