@@ -389,7 +389,9 @@ fn append_items(hmenu: HMENU, items: &[Item]) {
                 }
                 append_items(hsub, items);
                 let w = to_wide(label);
-                let _ = AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, PCWSTR(w.as_ptr()));
+                if AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, PCWSTR(w.as_ptr())).is_err() {
+                    let _ = DestroyMenu(hsub);
+                }
             },
         }
     }

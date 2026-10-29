@@ -24,12 +24,12 @@ Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/1
 
 ```powershell
 cargo build --release
-# exe: target\release\onair.exe  (~225 KB; 230,400 bytes)
+# exe: target\release\onair.exe  (~254 KB; 260,096 bytes)
 ```
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
 `strip` for minimal size. Idle CPU < 0.1% (single `GetMessageW` loop +
-`SetTimer` polling, redraw only on change), working set ~ <10 MB.
+`SetTimer` polling, redraw only on change), working set ~15 MB.
 
 The only runtime dependency is the `windows` crate; `winresource` is
 build-only and embeds the app icon/version metadata. Config parsing is

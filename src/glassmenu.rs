@@ -90,6 +90,8 @@ struct Menu {
     view_height: i32,
     scroll: i32,
     hot: Option<usize>,
+    pressed: Option<usize>,
+    last_mouse: Option<(i32, i32)>,
     open: Option<usize>,
     child: Option<HWND>,
     accent: bool,
@@ -776,8 +778,9 @@ unsafe fn refresh_content(menu: &Menu) {
 
 unsafe fn apply_region(hwnd: HWND, w: i32, h: i32, radius: i32) {
     let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2);
-    if !rgn.is_invalid() {
-        let _ = SetWindowRgn(hwnd, Some(rgn), true);
+    if !rgn.is_invalid() && SetWindowRgn(hwnd, Some(rgn), true) == 0 {
+        // On success the system owns the region; on failure the caller keeps it.
+        let _ = DeleteObject(rgn.into());
     }
 }
 
@@ -1020,6 +1023,8 @@ unsafe fn create_menu(
         view_height: view_h,
         scroll: 0,
         hot: None,
+        pressed: None,
+        last_mouse: None,
         open: None,
         child: None,
         accent: false,
@@ -1293,8 +1298,26 @@ unsafe fn activate_item(s: &mut Session, idx: usize, item: usize, select_first: 
     }
 }
 
+/// The scroll indicator is painted over the right padding; clicks there
+/// should scroll, not activate the row behind it.
+fn scroll_gutter(menu: &Menu, x: i32, y: i32) -> bool {
+    if menu.layout.height <= menu.view_height {
+        return false;
+    }
+    let s = menu.layout.dpi as f32 / 96.0;
+    let track_w = (2.0 * s).round().max(1.0);
+    let x0 = (menu.layout.width as f32 - menu.layout.pad_x as f32 * 0.5 - track_w * 0.5).round();
+    let pad_y = scale(PAD_Y96, menu.layout.dpi);
+    (x as f32) >= x0 && (x as f32) < x0 + track_w && y >= pad_y && y < menu.view_height - pad_y
+}
+
 fn hit_test(menu: &Menu, x: i32, y: i32) -> Option<usize> {
-    if x < 0 || x >= menu.layout.width || y < 0 || y >= menu.view_height {
+    if x < 0
+        || x >= menu.layout.width
+        || y < 0
+        || y >= menu.view_height
+        || scroll_gutter(menu, x, y)
+    {
         return None;
     }
     let cy = y + menu.scroll;
@@ -1353,9 +1376,16 @@ unsafe fn handle_glass_message(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            ensure_mouse_tracking(hwnd);
             let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            // Windows can deliver a duplicate move when another menu window
+            // appears under a stationary cursor. Ignoring it preserves the
+            // keyboard selection and keeps a just-opened submenu open.
+            if s.windows[idx].last_mouse == Some((x, y)) {
+                return LRESULT(0);
+            }
+            s.windows[idx].last_mouse = Some((x, y));
+            ensure_mouse_tracking(hwnd);
             let new_hot = hit_test(&s.windows[idx], x, y);
             let old_hot = s.windows[idx].hot;
             let open = s.windows[idx].open;
@@ -1366,11 +1396,18 @@ unsafe fn handle_glass_message(
             if new_hot != old_hot {
                 s.windows[idx].hot = new_hot;
                 refresh_content(&s.windows[idx]);
-                start_hover_timer(&s.windows[idx]);
+                // A held mouse button must not auto-open a submenu.
+                if s.windows[idx].pressed.is_none() {
+                    start_hover_timer(&s.windows[idx]);
+                } else {
+                    let _ = KillTimer(Some(hwnd), HOVER_TIMER);
+                }
             }
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
+            s.windows[idx].pressed = None;
+            s.windows[idx].last_mouse = None;
             let has_child = s.windows[idx].child.is_some();
             let old_hot = s.windows[idx].hot;
             if !has_child {
@@ -1383,13 +1420,36 @@ unsafe fn handle_glass_message(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
+            let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             if s.windows[idx].child.is_some() {
                 close_submenu(s, idx, false);
             }
+            let pressed = hit_test(&s.windows[idx], x, y);
+            s.windows[idx].pressed = pressed;
+            if pressed != s.windows[idx].hot {
+                s.windows[idx].hot = pressed;
+                refresh_content(&s.windows[idx]);
+            }
+            // Do not let the hover timer open a submenu while the button is held.
+            let _ = KillTimer(Some(hwnd), HOVER_TIMER);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
             let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            if let Some(item) = hit_test(&s.windows[idx], x, y) {
-                activate_item(s, idx, item, false);
+            let pressed = s.windows[idx].pressed.take();
+            let over = hit_test(&s.windows[idx], x, y);
+            if let Some(item) = pressed {
+                if over == Some(item) {
+                    activate_item(s, idx, item, false);
+                    return LRESULT(0);
+                }
+            }
+            if over != s.windows[idx].hot {
+                s.windows[idx].hot = over;
+                refresh_content(&s.windows[idx]);
+                start_hover_timer(&s.windows[idx]);
             }
             LRESULT(0)
         }
@@ -1398,8 +1458,28 @@ unsafe fn handle_glass_message(
             if delta != 0 {
                 let step = scale(ITEM_H96, s.windows[idx].layout.dpi) * 2;
                 let max = (s.windows[idx].layout.height - s.windows[idx].view_height).max(0);
-                s.windows[idx].scroll = (s.windows[idx].scroll - delta / 120 * step).clamp(0, max);
-                refresh_content(&s.windows[idx]);
+                let scroll = (s.windows[idx].scroll - delta / 120 * step).clamp(0, max);
+                if scroll != s.windows[idx].scroll {
+                    // The submenu is anchored to a row, so it cannot stay open
+                    // while the parent list scrolls away from under it.
+                    if s.windows[idx].child.is_some() {
+                        close_submenu(s, idx, false);
+                    }
+                    s.windows[idx].pressed = None;
+                    s.windows[idx].scroll = scroll;
+                    // Re-hit-test the cursor: scrolling moves the rows under it.
+                    let mut pt = POINT::default();
+                    let hot = if GetCursorPos(&mut pt).is_ok()
+                        && ScreenToClient(hwnd, &mut pt).as_bool()
+                    {
+                        hit_test(&s.windows[idx], pt.x, pt.y)
+                    } else {
+                        None
+                    };
+                    s.windows[idx].hot = hot;
+                    refresh_content(&s.windows[idx]);
+                    start_hover_timer(&s.windows[idx]);
+                }
             }
             LRESULT(0)
         }
@@ -1627,5 +1707,98 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
             DispatchMessageW(&msg);
         }
         cleanup_session()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(item: usize, top: i32, bottom: i32, kind: RowKind) -> Row {
+        Row {
+            item,
+            rect: RECT {
+                left: 0,
+                top,
+                right: 200,
+                bottom,
+            },
+            kind,
+        }
+    }
+
+    fn menu(height: i32, view_height: i32, rows: Vec<Row>) -> Menu {
+        Menu {
+            hwnd: HWND::default(),
+            content: HWND::default(),
+            parent: None,
+            depth: 0,
+            items: Vec::new(),
+            layout: Layout {
+                width: 200,
+                height,
+                dpi: 96,
+                pad_x: scale(PAD_X96, 96),
+                check_w: scale(CHECK_W96, 96),
+                arrow_w: scale(ARROW_W96, 96),
+                radius: scale(RADIUS96, 96),
+                rows,
+                font: HFONT::default(),
+            },
+            view_height,
+            scroll: 0,
+            hot: None,
+            pressed: None,
+            last_mouse: None,
+            open: None,
+            child: None,
+            accent: false,
+        }
+    }
+
+    #[test]
+    fn hit_test_uses_scroll_offset_and_skips_disabled_rows() {
+        let mut m = menu(
+            120,
+            60,
+            vec![
+                row(0, 0, 30, RowKind::Action),
+                row(1, 30, 60, RowKind::Submenu),
+                row(2, 60, 90, RowKind::Disabled),
+            ],
+        );
+        assert_eq!(hit_test(&m, 10, 10), Some(0));
+        assert_eq!(hit_test(&m, 10, 45), Some(1));
+        assert_eq!(hit_test(&m, 10, 75), None);
+        m.scroll = 20;
+        assert_eq!(hit_test(&m, 10, 10), Some(1));
+        assert_eq!(hit_test(&m, 10, 50), None);
+    }
+
+    #[test]
+    fn scroll_gutter_blocks_clicks_on_indicator() {
+        let m = menu(
+            120,
+            60,
+            vec![
+                row(0, 0, 30, RowKind::Action),
+                row(1, 30, 60, RowKind::Submenu),
+            ],
+        );
+        // width 200, pad_x 12, track 2 -> indicator occupies x 193..195.
+        assert!(scroll_gutter(&m, 193, 30));
+        assert!(scroll_gutter(&m, 194, 30));
+        assert!(!scroll_gutter(&m, 192, 30));
+        assert!(!scroll_gutter(&m, 100, 30));
+        assert!(!scroll_gutter(&m, 193, 4));
+        assert!(!scroll_gutter(&m, 193, 56));
+        assert_eq!(hit_test(&m, 193, 30), None);
+        assert_eq!(hit_test(&m, 100, 30), Some(1));
+    }
+
+    #[test]
+    fn scroll_gutter_absent_when_menu_fits() {
+        let m = menu(60, 60, vec![row(0, 0, 30, RowKind::Action)]);
+        assert!(!scroll_gutter(&m, 193, 30));
     }
 }
