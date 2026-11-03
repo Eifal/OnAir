@@ -17,7 +17,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use config::{AppConfig, MenuStyle, MouseBtn, ToggleKey, TriggerMode};
+use config::{AppConfig, MenuStyle, MouseBtn, ToggleKey, TriggerMode, VmMode};
 use vm::{MicState, VmClient};
 use window::{
     apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect,
@@ -42,6 +42,8 @@ struct AppState {
     hold_held: bool,
     // Display state saved on key-down (true=ON/green, false=OFF/red).
     hold_saved_on: Option<bool>,
+    // Raw A/B states saved on key-down in switch mode.
+    hold_saved_switch: Option<(bool, bool)>,
     hold_down_at: Option<std::time::Instant>,
 }
 
@@ -143,11 +145,29 @@ fn do_poll_and_update() {
     }
 }
 
-/// Flip the configured Voicemeeter button via the Remote API, then poll
-/// immediately so the overlay reflects the result. Silent on any failure.
+/// Perform one switch press and return the raw A/B states from before the
+/// write (used by hold restore). None when either button is unreadable.
+fn switch_now() -> Option<(bool, bool)> {
+    let (primary, secondary) = {
+        let c = &app_mut().cfg;
+        (c.vm_param.clone(), c.vm_param_b.clone())
+    };
+    app_mut().vm.switch_pair(&primary, &secondary)
+}
+
+/// Run the configured action via the Remote API, then poll immediately so
+/// the overlay reflects the result. Silent on any failure.
 fn do_toggle() {
-    let param = app_mut().cfg.vm_param.clone();
-    app_mut().vm.toggle_param(&param);
+    let mode = app_mut().cfg.vm_mode;
+    match mode {
+        VmMode::Toggle => {
+            let param = app_mut().cfg.vm_param.clone();
+            app_mut().vm.toggle_param(&param);
+        }
+        VmMode::Switch => {
+            switch_now();
+        }
+    }
     do_poll_and_update();
 }
 
@@ -171,6 +191,20 @@ fn do_hold_down() {
         return; // auto-repeat guard (backup for the hook-side filter)
     }
     if app_mut().cfg.toggle_key.is_none() {
+        return;
+    }
+    if app_mut().cfg.vm_mode == VmMode::Switch {
+        // Momentary A/B: swap now, restore both raw states on release.
+        let Some(saved) = switch_now() else {
+            return; // either button unavailable: don't latch a hold
+        };
+        {
+            let a = app_mut();
+            a.hold_held = true;
+            a.hold_saved_switch = Some(saved);
+            a.hold_down_at = Some(std::time::Instant::now());
+        }
+        do_poll_and_update();
         return;
     }
     let saved_on = match app_mut().mic {
@@ -200,19 +234,38 @@ fn do_hold_up_restore() {
     if !app_mut().hold_held {
         return;
     }
-    let (param, invert, saved) = {
+    let (mode, primary, secondary, invert, saved_on, saved_switch) = {
         let a = app_mut();
         let s = a.hold_saved_on;
+        let sw = a.hold_saved_switch;
         a.hold_held = false;
         a.hold_saved_on = None;
+        a.hold_saved_switch = None;
         a.hold_down_at = None;
-        (a.cfg.vm_param.clone(), a.cfg.invert, s)
+        (
+            a.cfg.vm_mode,
+            a.cfg.vm_param.clone(),
+            a.cfg.vm_param_b.clone(),
+            a.cfg.invert,
+            s,
+            sw,
+        )
     };
-    if let Some(saved_on) = saved {
-        app_mut()
-            .vm
-            .set_raw(&param, raw_for_display(saved_on, invert));
-        do_poll_and_update();
+    match mode {
+        VmMode::Toggle => {
+            if let Some(saved_on) = saved_on {
+                app_mut()
+                    .vm
+                    .set_raw(&primary, raw_for_display(saved_on, invert));
+                do_poll_and_update();
+            }
+        }
+        VmMode::Switch => {
+            if let Some(saved) = saved_switch {
+                app_mut().vm.restore_pair(&primary, &secondary, saved);
+                do_poll_and_update();
+            }
+        }
     }
 }
 
@@ -222,30 +275,54 @@ fn do_hold_up_both() {
     if !app_mut().hold_held {
         return;
     }
-    let (param, invert, saved, thresh) = {
+    let (mode, primary, secondary, invert, saved_on, saved_switch, thresh) = {
         let a = app_mut();
         let dur_ms = a
             .hold_down_at
             .map(|t| std::time::Instant::now().duration_since(t).as_millis() as u64)
             .unwrap_or(u64::MAX);
         let s = a.hold_saved_on;
+        let sw = a.hold_saved_switch;
         let th = a.cfg.hold_tap_ms as u64;
         a.hold_held = false;
         a.hold_saved_on = None;
+        a.hold_saved_switch = None;
         a.hold_down_at = None;
-        (a.cfg.vm_param.clone(), a.cfg.invert, s, (dur_ms, th))
+        (
+            a.cfg.vm_mode,
+            a.cfg.vm_param.clone(),
+            a.cfg.vm_param_b.clone(),
+            a.cfg.invert,
+            s,
+            sw,
+            (dur_ms, th),
+        )
     };
     let (dur_ms, thresh_ms) = thresh;
-    if let Some(saved_on) = saved {
-        let target_on = if dur_ms < thresh_ms {
-            !saved_on // tap: toggle
-        } else {
-            saved_on // hold: momentary, restore
-        };
-        app_mut()
-            .vm
-            .set_raw(&param, raw_for_display(target_on, invert));
-        do_poll_and_update();
+    match mode {
+        VmMode::Toggle => {
+            if let Some(saved_on) = saved_on {
+                let target_on = if dur_ms < thresh_ms {
+                    !saved_on // tap: toggle
+                } else {
+                    saved_on // hold: momentary, restore
+                };
+                app_mut()
+                    .vm
+                    .set_raw(&primary, raw_for_display(target_on, invert));
+                do_poll_and_update();
+            }
+        }
+        VmMode::Switch => {
+            // Key-down already swapped. A tap keeps the new side; a long
+            // hold restores both raw states like a momentary A/B switch.
+            if let Some(saved) = saved_switch {
+                if dur_ms >= thresh_ms {
+                    app_mut().vm.restore_pair(&primary, &secondary, saved);
+                    do_poll_and_update();
+                }
+            }
+        }
     }
 }
 
@@ -255,6 +332,7 @@ fn reset_hold_tracking() {
     let a = app_mut();
     a.hold_held = false;
     a.hold_saved_on = None;
+    a.hold_saved_switch = None;
     a.hold_down_at = None;
 }
 
@@ -698,6 +776,19 @@ fn handle_command(hwnd: HWND, id: u32) {
         refresh_tray();
         return;
     }
+    if id == ID_VM_MODE_TOGGLE || id == ID_VM_MODE_SWITCH {
+        // Never change the action mode while a momentary hold is active:
+        // key-up must restore against the mode it started in.
+        restore_hold_if_held();
+        app_mut().cfg.vm_mode = if id == ID_VM_MODE_SWITCH {
+            VmMode::Switch
+        } else {
+            VmMode::Toggle
+        };
+        let _ = app_mut().cfg.save();
+        refresh_tray();
+        return;
+    }
     if id == ID_OPEN_CFG {
         tray::open_config_file();
         return;
@@ -831,6 +922,32 @@ fn handle_command(hwnd: HWND, id: u32) {
             do_poll_and_update();
             refresh_tray();
         }
+        return;
+    }
+    if (ID_STRIP_B_BASE..ID_STRIP_B_BASE + 8).contains(&id) {
+        // Secondary button (switch mode only): same strip/button editing
+        // as the primary parameter, but no overlay poll is needed.
+        restore_hold_if_held();
+        let strip1 = id - ID_STRIP_B_BASE + 1; // 1-based
+        let btn = tray::parse_strip_button(&app_mut().cfg.vm_param_b)
+            .map(|(_, b)| b)
+            .unwrap_or_else(|| "B1".to_string());
+        app_mut().cfg.vm_param_b = format!("Strip[{}].{}", strip1 - 1, btn);
+        let _ = app_mut().cfg.save();
+        refresh_tray();
+        return;
+    }
+    if (ID_BTN_B_BASE..ID_BTN_B_BASE + 9).contains(&id) {
+        restore_hold_if_held();
+        let idx = (id - ID_BTN_B_BASE) as usize;
+        if let Some(&b) = BUTTONS.get(idx) {
+            let strip0 = tray::parse_strip_button(&app_mut().cfg.vm_param_b)
+                .map(|(s, _)| s - 1)
+                .unwrap_or(0);
+            app_mut().cfg.vm_param_b = format!("Strip[{}].{}", strip0, b);
+            let _ = app_mut().cfg.save();
+            refresh_tray();
+        }
     }
 }
 
@@ -919,6 +1036,7 @@ fn main() {
             capture_until: None,
             hold_held: false,
             hold_saved_on: None,
+            hold_saved_switch: None,
             hold_down_at: None,
         });
 

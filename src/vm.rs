@@ -40,6 +40,21 @@ pub struct VmClient {
 /// throttled to once per this interval.
 const LOAD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn flag(on: bool) -> f32 {
+    if on {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Raw target states for a switch press. The primary's previous state
+/// selects the other side, so both-ON and both-OFF still end with exactly
+/// one button ON.
+fn switch_target(primary_on: bool) -> (bool, bool) {
+    (!primary_on, primary_on)
+}
+
 impl VmClient {
     pub fn new() -> Self {
         let mut c = Self {
@@ -260,6 +275,59 @@ impl VmClient {
         rep == 0
     }
 
+    /// Read a 0/1 button parameter as a raw boolean. Returns None when the
+    /// DLL/server/parameter is unavailable. `invert` is display-only and is
+    /// intentionally not applied here.
+    fn read_button(&mut self, vm_param: &str) -> Option<bool> {
+        if !self.ensure_login_for_action() {
+            return None;
+        }
+        let f_get = self.f_get?;
+        let mut name = Self::ansi_param(vm_param);
+        let mut val: f32 = 0.0;
+        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+            return None;
+        }
+        Some(val >= 0.5)
+    }
+
+    /// Swap two 0/1 parameters based on the primary's current value: when
+    /// the primary is ON it becomes OFF and the secondary ON, and vice
+    /// versa. This keeps exactly one button ON even when both started in
+    /// the same state. Returns the pre-switch raw states for hold restore,
+    /// or None when either parameter cannot be read or a write fails.
+    /// `invert` is display-only and is intentionally ignored here.
+    pub fn switch_pair(&mut self, primary: &str, secondary: &str) -> Option<(bool, bool)> {
+        if primary == secondary {
+            let on = self.read_button(primary)?;
+            if !self.set_raw(primary, flag(!on)) {
+                return None;
+            }
+            return Some((on, on));
+        }
+        let primary_on = self.read_button(primary)?;
+        let secondary_on = self.read_button(secondary)?;
+        let (target, secondary_target) = switch_target(primary_on);
+        if !self.set_raw(primary, flag(target)) {
+            return None;
+        }
+        if !self.set_raw(secondary, flag(secondary_target)) {
+            // Do not leave the pair with both buttons ON when the second
+            // write failed; put the primary back where it was.
+            let _ = self.set_raw(primary, flag(primary_on));
+            return None;
+        }
+        Some((primary_on, secondary_on))
+    }
+
+    /// Restore the raw states captured by `switch_pair` (best effort).
+    pub fn restore_pair(&mut self, primary: &str, secondary: &str, states: (bool, bool)) {
+        let _ = self.set_raw(primary, flag(states.0));
+        if primary != secondary {
+            let _ = self.set_raw(secondary, flag(states.1));
+        }
+    }
+
     /// Flip a 0/1 button parameter (e.g. Strip[0].B2): reads the current
     /// value and writes back the inverse. Silent on any failure; the next
     /// poll() shows the resulting state. Toggle is symmetric, so `invert`
@@ -399,5 +467,24 @@ fn read_uninstall_dir() -> Option<String> {
             return Some(parent.to_string_lossy().to_string());
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_targets_always_leave_one_side_on() {
+        // Primary ON -> primary OFF, secondary ON.
+        assert_eq!(switch_target(true), (false, true));
+        // Primary OFF -> primary ON, secondary OFF.
+        assert_eq!(switch_target(false), (true, false));
+    }
+
+    #[test]
+    fn flag_maps_booleans_to_button_values() {
+        assert_eq!(flag(true), 1.0);
+        assert_eq!(flag(false), 0.0);
     }
 }

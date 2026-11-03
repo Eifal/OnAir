@@ -74,6 +74,38 @@ pub fn parse_trigger_mode(raw: &str) -> TriggerMode {
     }
 }
 
+/// What the toggle keybind does to Voicemeeter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmMode {
+    /// Flip one parameter ON/OFF.
+    Toggle,
+    /// Swap two parameters so exactly one is ON.
+    Switch,
+}
+
+impl VmMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VmMode::Toggle => "toggle",
+            VmMode::Switch => "switch",
+        }
+    }
+}
+
+/// Parse vm_mode values. Unknown values fall back to Toggle.
+pub fn parse_vm_mode(raw: &str) -> VmMode {
+    let norm: String = raw
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '_' | '-' | '+' | '/'))
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match norm.as_str() {
+        "SWITCH" | "SWAP" | "AB" | "ALTERNATE" | "ALTERNATING" | "TWOBUTTONS" => VmMode::Switch,
+        // "TOGGLE", "ONOFF", "PRESS" and anything unknown -> Toggle.
+        _ => VmMode::Toggle,
+    }
+}
+
 /// Overlay visual style. All styles share the same square window
 /// (same drag/click area), only the drawing differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +358,9 @@ pub struct AppConfig {
     pub opacity: u32,
     pub locked: bool,
     pub always_on_top: bool,
+    pub vm_mode: VmMode,
     pub vm_param: String,
+    pub vm_param_b: String,
     pub invert: bool,
     pub poll_ms: u32,
     pub toggle_key: ToggleKey,
@@ -350,7 +384,9 @@ impl Default for AppConfig {
             opacity: 90,
             locked: false,
             always_on_top: true,
+            vm_mode: VmMode::Toggle,
             vm_param: "Strip[0].B2".to_string(),
+            vm_param_b: "Strip[0].B1".to_string(),
             invert: false,
             poll_ms: 100,
             toggle_key: ToggleKey::None,
@@ -376,6 +412,9 @@ impl AppConfig {
         self.bg_opacity = self.bg_opacity.clamp(0, 100);
         if self.vm_param.trim().is_empty() {
             self.vm_param = "Strip[0].B2".to_string();
+        }
+        if self.vm_param_b.trim().is_empty() {
+            self.vm_param_b = "Strip[0].B1".to_string();
         }
     }
 
@@ -452,9 +491,15 @@ impl AppConfig {
                 }
                 "locked" => cfg.locked = parse_bool(val, cfg.locked),
                 "always_on_top" => cfg.always_on_top = parse_bool(val, cfg.always_on_top),
+                "vm_mode" | "action_mode" => cfg.vm_mode = parse_vm_mode(val),
                 "vm_param" => {
                     if !val.is_empty() {
                         cfg.vm_param = val.to_string();
+                    }
+                }
+                "vm_param_b" | "vm_param2" | "vm_param_second" => {
+                    if !val.is_empty() {
+                        cfg.vm_param_b = val.to_string();
                     }
                 }
                 "invert" => cfg.invert = parse_bool(val, cfg.invert),
@@ -520,7 +565,9 @@ impl AppConfig {
              opacity={}\n\
              locked={}\n\
              always_on_top={}\n\
+             vm_mode={}\n\
              vm_param={}\n\
+             vm_param_b={}\n\
              invert={}\n\
              poll_ms={}\n\
              toggle_key={}\n\
@@ -539,7 +586,9 @@ impl AppConfig {
             self.opacity,
             self.locked,
             self.always_on_top,
+            self.vm_mode.as_str(),
             self.vm_param,
+            self.vm_param_b,
             self.invert,
             self.poll_ms,
             toggle_key_name(self.toggle_key),
@@ -752,6 +801,21 @@ mod tests {
     }
 
     #[test]
+    fn vm_mode_parse() {
+        assert_eq!(parse_vm_mode("toggle"), VmMode::Toggle);
+        assert_eq!(parse_vm_mode("ON/OFF"), VmMode::Toggle);
+        assert_eq!(parse_vm_mode("switch"), VmMode::Switch);
+        assert_eq!(parse_vm_mode("SWAP"), VmMode::Switch);
+        assert_eq!(parse_vm_mode("a/b"), VmMode::Switch);
+        assert_eq!(parse_vm_mode("two buttons"), VmMode::Switch);
+        assert_eq!(parse_vm_mode(" alternate "), VmMode::Switch);
+        assert_eq!(parse_vm_mode(""), VmMode::Toggle);
+        assert_eq!(parse_vm_mode("garbage"), VmMode::Toggle);
+        assert_eq!(VmMode::Toggle.as_str(), "toggle");
+        assert_eq!(VmMode::Switch.as_str(), "switch");
+    }
+
+    #[test]
     fn hold_tap_ms_clamp() {
         let mut cfg = AppConfig::default();
         assert_eq!(cfg.hold_tap_ms, 300);
@@ -772,6 +836,7 @@ mod tests {
             hold_tap_ms: 1,
             bg_opacity: 101,
             vm_param: "   ".to_string(),
+            vm_param_b: "  ".to_string(),
             ..Default::default()
         };
         cfg.clamp();
@@ -781,6 +846,7 @@ mod tests {
         assert_eq!(cfg.hold_tap_ms, 100);
         assert_eq!(cfg.bg_opacity, 100);
         assert_eq!(cfg.vm_param, "Strip[0].B2");
+        assert_eq!(cfg.vm_param_b, "Strip[0].B1");
 
         let mut cfg = AppConfig {
             size: 9999,

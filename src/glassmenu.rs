@@ -44,6 +44,9 @@ const CHECK_W96: i32 = 24;
 const ARROW_W96: i32 = 24;
 const RADIUS96: i32 = 8;
 const MIN_W96: i32 = 190;
+/// Deepest cascade we allow (number of windows, root included):
+/// root -> Voicemeeter source -> Primary/Secondary -> Strip/Button.
+const MAX_MENU_DEPTH: u32 = 4;
 
 const TEXT: (u8, u8, u8) = (0xF5, 0xF5, 0xF5);
 const TEXT_DISABLED: (u8, u8, u8) = (0x8C, 0x8C, 0x96);
@@ -1199,7 +1202,7 @@ unsafe fn open_submenu(s: &mut Session, parent_idx: usize, item_idx: usize, sele
     if s.windows[parent_idx].open == Some(item_idx) && s.windows[parent_idx].child.is_some() {
         return;
     }
-    if depth_of(s, s.windows[parent_idx].hwnd) >= 3 {
+    if depth_of(s, s.windows[parent_idx].hwnd) >= MAX_MENU_DEPTH {
         return;
     }
     let parent_hwnd = s.windows[parent_idx].hwnd;

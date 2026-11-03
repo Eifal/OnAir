@@ -1,13 +1,15 @@
 # OnAir
 
-Tiny Windows overlay showing whether one Voicemeeter parameter is ON or OFF.
+Tiny Windows overlay showing whether a Voicemeeter button is ON or OFF, or
+which of two buttons is currently active.
 
-- 🟢 green circle = mic live (ON)
-- 🔴 red circle = mic muted (OFF)
+- 🟢 green circle = primary button live (ON)
+- 🔴 red circle = primary button muted (OFF)
 - ⚪ gray circle = cannot be read (Voicemeeter closed / bad parameter / not installed)
 
 Default parameter: **Strip 1, button B2** (`Strip[0].B2`). Toggle B2 with a
-Voicemeeter macro button (e.g. mouse side button) to mute/unmute.
+Voicemeeter macro button (e.g. mouse side button) to mute/unmute, or use
+**Action mode → Switch** to swap between two freely chosen buttons.
 Overlay is meant for FiveM / GTA RP in **borderless windowed** mode.
 
 No focus stealing, no clicks captured when locked, near-zero CPU/RAM.
@@ -24,7 +26,7 @@ Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/1
 
 ```powershell
 cargo build --release
-# exe: target\release\onair.exe  (~254 KB; 260,096 bytes)
+# exe: target\release\onair.exe  (~257 KB; 263,168 bytes)
 ```
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
@@ -59,14 +61,15 @@ Left and right click both open the menu:
 - Visual: Dot / Ring / Bar / Mini (see below)
 - Background: 100 / 90 / 70 / 50 / 30 / Transparent (bg square only)
 - Menu style: Glass (acrylic, default) / Native (Win32)
+- Action mode: Toggle (one button on/off) / Switch (two buttons A/B)
 - Voicemeeter source:
-  - Strip 1–8 (→ `Strip[n-1]`)
-  - Button A1–A5, B1–B3, Mute
-  - Invert (checkmark)
-  - If `vm_param` was hand-edited to something else, a disabled
-    `Custom: <param>` label is shown at the top of this submenu.
+  - Primary: Strip 1–8 (→ `Strip[n-1]`) + Button A1–A5, B1–B3, Mute
+  - Secondary: same choices, used by Switch mode
+  - Invert (checkmark, affects the primary display only)
+  - If `vm_param` or `vm_param_b` was hand-edited to something else, a
+    disabled `Custom: <param>` label is shown inside its submenu.
 - Open config file / Reload config / Quit
-- Mic toggle keybind (see below):
+- Action keybind (see below):
   - `Toggle key: <name>` (current bind, informational)
   - Set toggle key… / Clear toggle key
   - Trigger mode: Toggle (press) / Hold (push-to-talk) / Both
@@ -88,7 +91,9 @@ size=48
 opacity=90
 locked=false
 always_on_top=true
+vm_mode=toggle
 vm_param=Strip[0].B2
+vm_param_b=Strip[0].B1
 invert=false
 poll_ms=100
 toggle_key=None
@@ -107,6 +112,8 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 `hold_tap_ms` 100–2000, `bg_opacity` 0–100. Colors are 6-digit hex without `#`.
 `trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
 `ptt`, `toggle+hold`); unknown falls back to `toggle`.
+`vm_mode` accepts `toggle` / `switch` (aliases: `swap`, `a/b`, `alternate`,
+`two buttons`); unknown falls back to `toggle`.
 `visual_style` accepts `dot` / `ring` / `bar` / `mini`
 (aliases: `strip`/`pill` → bar, `circle`/`outline` → ring,
 `minimal`/`nobg` → mini); unknown falls back to `dot`.
@@ -151,6 +158,30 @@ Tray icon always stays Dot for recognizability.
 - Tray → **Menu style** or `config.ini`; the change applies the next time the
   menu opens.
 
+## Action modes
+
+Tray → **Action mode** chooses what the keybind does:
+
+- **Toggle (one button on/off)** — the existing behavior: each press flips
+  `vm_param` between ON and OFF. This is the default.
+- **Switch (two buttons A/B)** — each press swaps `vm_param` (primary) and
+  `vm_param_b` (secondary). The primary's current raw state selects the
+  other side:
+  - primary ON → primary OFF, secondary ON
+  - primary OFF → primary ON, secondary OFF
+
+  This also keeps exactly one side ON when both started ON or both started
+  OFF. If the two parameters are identical, switch behaves like a normal
+  toggle. Both buttons can be on any strip and any button (for example
+  `Strip[0].B1` and `Strip[3].B2`).
+
+The overlay dot and tooltip always follow the **primary** parameter; a
+`(A/B switch)` suffix appears in the tooltip while switch mode is active.
+`invert` remains display-only for the primary. Switching writes raw 0/1
+values, so both parameters must be readable; if either one is unknown,
+Voicemeeter is not running, or a write fails, the press does nothing and
+the existing state is left alone.
+
 ## Voicemeeter
 
 Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
@@ -170,22 +201,29 @@ Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
 - Handles Voicemeeter started after the overlay, closed and restarted —
   recovers automatically (gray while closed, no crash, no popups).
 - Writing back: `VBVMR_SetParameterFloat(name, value)`
-  (0 OK, -2 no server, -3 unknown parameter) powers the toggle keybind.
-- `vm_param` is zero-indexed: UI "Strip 1" = `Strip[0]`.
+  (0 OK, -2 no server, -3 unknown parameter) powers the action keybind.
+  Toggle mode writes one parameter; switch mode reads both, then writes
+  the complementary pair.
+- `vm_param` and `vm_param_b` are zero-indexed: UI "Strip 1" = `Strip[0]`.
   Examples: `Strip[0].B2`, `Strip[0].Mute`, `Bus[1].Mute`.
-- `invert=true` flips green/red, so parameters with opposite logic
-  (e.g. `Strip[0].Mute = 1` means muted) work correctly.
+- `invert=true` flips the primary's green/red display, so parameters with
+  opposite logic (e.g. `Strip[0].Mute = 1` means muted) still read
+  correctly. It does not change which raw value switch mode writes.
 
-## Mic toggle / hold via keybind
+## Action keybind / hold
 
-The overlay can drive the configured Voicemeeter button itself, so
+The overlay can drive the configured Voicemeeter button(s) itself, so
 Voicemeeter's own macro button is optional. Tray → **Trigger mode**:
 
-- **Toggle (press)** — key/button down flips the parameter permanently.
-- **Hold (push-to-talk)** — while held the mic is forced ON (green),
-  on release it returns to the state saved on key-down.
-- **Both** — tap faster than `hold_tap_ms` toggles, holding longer is
-  momentary (release restores the saved state).
+- **Toggle (press)** — key/button down flips the parameter permanently
+  (or swaps the A/B pair in switch mode).
+- **Hold (push-to-talk)** — in toggle mode, while held the mic is forced
+  ON (green), on release it returns to the state saved on key-down. In
+  switch mode this is a momentary A/B swap: press selects the other side,
+  release restores both saved raw states.
+- **Both** — tap faster than `hold_tap_ms` toggles (or swaps permanently
+  in switch mode), holding longer is momentary (release restores the
+  saved state).
 
 Details:
 
@@ -197,11 +235,13 @@ Details:
   games/apps AND drives the mic.
 - Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
   never spams toggles. Key-up is only used by Hold/Both (ignored in Toggle).
-- Hold writes the value that renders as ON (accounts for `invert`), so
-  `invert=true` still gives green while held.
-- If Voicemeeter is unreachable (gray state), holds/toggles are ignored.
-  If you change the parameter manually mid-hold, the release restores the
-  saved state and overwrites that manual change (expected for simple PTT).
+- In toggle mode, Hold writes the value that renders as ON (accounts for
+  `invert`), so `invert=true` still gives green while held. In switch mode,
+  Hold restores the exact raw A/B states saved on press.
+- If Voicemeeter is unreachable (gray state) or either switch parameter is
+  unknown, presses are ignored. If you change a parameter manually
+  mid-hold, the release restores the saved state and overwrites that
+  manual change (expected for simple PTT / momentary switch).
 - `hold_tap_ms` (Both only) is configurable via tray
   (200/300/500/800 ms) or freely in `config.ini` (100–2000, default 300).
 - Coverage is whatever Windows low-level hooks see: keyboard incl. F13–F24,

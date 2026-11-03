@@ -3,7 +3,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::config::{AppConfig, MenuStyle, TriggerMode, VisualStyle};
+use crate::config::{AppConfig, MenuStyle, TriggerMode, VisualStyle, VmMode};
 use crate::vm::MicState;
 use crate::window::{to_wide, WM_TRAY};
 
@@ -12,9 +12,13 @@ pub const ID_LOCK: u32 = 1000;
 pub const ID_TOPMOST: u32 = 1001;
 pub const ID_SIZE_BASE: u32 = 1100; // +0..5 -> 24,32,48,64,96,128
 pub const ID_OPACITY_BASE: u32 = 1200; // +0..8 -> 100..20
-pub const ID_STRIP_BASE: u32 = 1300; // +0..7 -> Strip 1..8
-pub const ID_BTN_BASE: u32 = 1400; // +0..8 -> A1..A5,B1..B3,Mute
+pub const ID_STRIP_BASE: u32 = 1300; // +0..7 -> primary Strip 1..8
+pub const ID_STRIP_B_BASE: u32 = 1310; // +0..7 -> secondary Strip 1..8
+pub const ID_BTN_BASE: u32 = 1400; // +0..8 -> primary A1..A5,B1..B3,Mute
 pub const ID_INVERT: u32 = 1410;
+pub const ID_VM_MODE_TOGGLE: u32 = 1420;
+pub const ID_VM_MODE_SWITCH: u32 = 1421;
+pub const ID_BTN_B_BASE: u32 = 1430; // +0..8 -> secondary A1..A5,B1..B3,Mute
 pub const ID_OPEN_CFG: u32 = 1500;
 pub const ID_RELOAD_CFG: u32 = 1501;
 pub const ID_QUIT: u32 = 1502;
@@ -97,6 +101,42 @@ impl Item {
     }
 }
 
+/// Strip/Button submenus for one Voicemeeter parameter. Custom parameters
+/// (e.g. Bus[1].Mute) keep a disabled label so the menu never hides them.
+fn source_controls(param: &str, strip_base: u32, button_base: u32) -> Vec<Item> {
+    let parsed = parse_strip_button(param);
+    let mut items = Vec::new();
+    if parsed.is_none() {
+        items.push(Item::disabled(format!("Custom: {}", param)));
+        items.push(Item::Separator);
+    }
+    let cur_strip = parsed.as_ref().map(|(s, _)| *s).unwrap_or(0);
+    let strips: Vec<Item> = (1..=8u32)
+        .map(|n| {
+            Item::check(
+                strip_base + (n - 1),
+                format!("Strip {}", n),
+                parsed.is_some() && n == cur_strip,
+            )
+        })
+        .collect();
+    items.push(Item::submenu("Strip", strips));
+    let cur_btn = parsed.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
+    let buttons: Vec<Item> = BUTTONS
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            Item::check(
+                button_base + i as u32,
+                *b,
+                parsed.is_some() && *b == cur_btn,
+            )
+        })
+        .collect();
+    items.push(Item::submenu("Button", buttons));
+    items
+}
+
 /// Build the complete menu tree in display order.
 pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
     let mut root = Vec::new();
@@ -169,39 +209,33 @@ pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
         ),
     ];
     root.push(Item::submenu("Menu style", menu_styles));
+
+    let modes = vec![
+        Item::check(
+            ID_VM_MODE_TOGGLE,
+            "Toggle (one button on/off)",
+            cfg.vm_mode == VmMode::Toggle,
+        ),
+        Item::check(
+            ID_VM_MODE_SWITCH,
+            "Switch (two buttons A/B)",
+            cfg.vm_mode == VmMode::Switch,
+        ),
+    ];
+    root.push(Item::submenu("Action mode", modes));
     root.push(Item::Separator);
 
-    let parsed = parse_strip_button(&cfg.vm_param);
-    let mut vm = Vec::new();
-    if parsed.is_none() {
-        vm.push(Item::disabled(format!("Custom: {}", cfg.vm_param)));
-        vm.push(Item::Separator);
-    }
-    let cur_strip = parsed.as_ref().map(|(s, _)| *s).unwrap_or(0);
-    let strips: Vec<Item> = (1..=8u32)
-        .map(|n| {
-            Item::check(
-                ID_STRIP_BASE + (n - 1),
-                format!("Strip {}", n),
-                parsed.is_some() && n == cur_strip,
-            )
-        })
-        .collect();
-    vm.push(Item::submenu("Strip", strips));
-    let cur_btn = parsed.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
-    let buttons: Vec<Item> = BUTTONS
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            Item::check(
-                ID_BTN_BASE + i as u32,
-                *b,
-                parsed.is_some() && *b == cur_btn,
-            )
-        })
-        .collect();
-    vm.push(Item::submenu("Button", buttons));
-    vm.push(Item::check(ID_INVERT, "Invert", cfg.invert));
+    let vm = vec![
+        Item::submenu(
+            "Primary",
+            source_controls(&cfg.vm_param, ID_STRIP_BASE, ID_BTN_BASE),
+        ),
+        Item::submenu(
+            "Secondary",
+            source_controls(&cfg.vm_param_b, ID_STRIP_B_BASE, ID_BTN_B_BASE),
+        ),
+        Item::check(ID_INVERT, "Invert", cfg.invert),
+    ];
     root.push(Item::submenu("Voicemeeter source", vm));
     root.push(Item::Separator);
 
@@ -318,16 +352,23 @@ pub fn remove_tray(hwnd: HWND) {
 }
 
 pub fn tooltip_text(cfg: &AppConfig, state: &MicState) -> String {
+    // The dot always tracks the primary parameter; the suffix makes the
+    // action mode visible without trying to fit both parameters.
+    let suffix = if cfg.vm_mode == VmMode::Switch {
+        " (A/B switch)"
+    } else {
+        ""
+    };
     match state {
-        MicState::On => format!("OnAir: {} ON", cfg.vm_param),
-        MicState::Off => format!("OnAir: {} OFF", cfg.vm_param),
+        MicState::On => format!("OnAir: {} ON{}", cfg.vm_param, suffix),
+        MicState::Off => format!("OnAir: {} OFF{}", cfg.vm_param, suffix),
         MicState::Unknown(reason) => {
             if reason == "Voicemeeter not running" || reason == "Voicemeeter not installed" {
                 "OnAir: Voicemeeter not running".to_string()
             } else if reason == "Unknown parameter" {
-                format!("OnAir: {} unknown parameter", cfg.vm_param)
+                format!("OnAir: {} unknown parameter{}", cfg.vm_param, suffix)
             } else {
-                format!("OnAir: {} ?", cfg.vm_param)
+                format!("OnAir: {} ?{}", cfg.vm_param, suffix)
             }
         }
     }
@@ -490,6 +531,29 @@ pub fn open_config_file() {
 mod tests {
     use super::*;
 
+    fn find_submenu<'a>(items: &'a [Item], label: &str) -> &'a [Item] {
+        items
+            .iter()
+            .find_map(|item| match item {
+                Item::Submenu { label: l, items } if l == label => Some(items.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("submenu {label} not found"))
+    }
+
+    fn is_checked(items: &[Item], id: u32) -> bool {
+        items.iter().any(|item| {
+            matches!(
+                item,
+                Item::Check {
+                    id: check_id,
+                    checked: true,
+                    ..
+                } if *check_id == id
+            )
+        })
+    }
+
     #[test]
     fn menu_model_exposes_menu_style() {
         let cfg = AppConfig::default();
@@ -517,6 +581,64 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn menu_model_exposes_action_modes() {
+        let mut cfg = AppConfig::default();
+        let model = build_model(&cfg);
+        let modes = find_submenu(&model, "Action mode");
+        assert!(is_checked(modes, ID_VM_MODE_TOGGLE));
+        assert!(!is_checked(modes, ID_VM_MODE_SWITCH));
+
+        cfg.vm_mode = VmMode::Switch;
+        let model = build_model(&cfg);
+        let modes = find_submenu(&model, "Action mode");
+        assert!(!is_checked(modes, ID_VM_MODE_TOGGLE));
+        assert!(is_checked(modes, ID_VM_MODE_SWITCH));
+    }
+
+    #[test]
+    fn menu_model_exposes_primary_and_secondary_sources() {
+        let mut cfg = AppConfig {
+            vm_param: "Strip[1].B2".to_string(),
+            vm_param_b: "Strip[4].Mute".to_string(),
+            ..Default::default()
+        };
+        let model = build_model(&cfg);
+        let vm = find_submenu(&model, "Voicemeeter source");
+
+        let primary = find_submenu(vm, "Primary");
+        let primary_strip = find_submenu(primary, "Strip");
+        assert!(is_checked(primary_strip, ID_STRIP_BASE + 1));
+        let primary_button = find_submenu(primary, "Button");
+        assert!(is_checked(primary_button, ID_BTN_BASE + 6));
+
+        let secondary = find_submenu(vm, "Secondary");
+        let secondary_strip = find_submenu(secondary, "Strip");
+        assert!(is_checked(secondary_strip, ID_STRIP_B_BASE + 4));
+        let secondary_button = find_submenu(secondary, "Button");
+        assert!(is_checked(secondary_button, ID_BTN_B_BASE + 8));
+
+        // Custom parameters are shown, never hidden by the strip editor.
+        cfg.vm_param_b = "Bus[1].Mute".to_string();
+        let model = build_model(&cfg);
+        let secondary = find_submenu(find_submenu(&model, "Voicemeeter source"), "Secondary");
+        assert!(secondary.iter().any(|item| matches!(
+            item,
+            Item::Disabled { label } if label == "Custom: Bus[1].Mute"
+        )));
+    }
+
+    #[test]
+    fn switch_tooltip_mentions_mode() {
+        let mut cfg = AppConfig::default();
+        let tip = tooltip_text(&cfg, &MicState::On);
+        assert_eq!(tip, "OnAir: Strip[0].B2 ON");
+
+        cfg.vm_mode = VmMode::Switch;
+        let tip = tooltip_text(&cfg, &MicState::Off);
+        assert_eq!(tip, "OnAir: Strip[0].B2 OFF (A/B switch)");
     }
 
     #[test]
