@@ -14,6 +14,7 @@ path = "src/main.rs"
 winresource = "0.1"
 
 [dependencies]
+onair-config = { path = "crates/onair-config" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -35,3 +36,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[workspace]
+members = ["crates/onair-config", "crates/onair-settings"]
+resolver = "2"

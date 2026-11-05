@@ -1,8 +1,11 @@
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const CLASS_NAME: &str = "OnAirOverlay";
 pub const MUTEX_NAME: &str = "Local\\OnAirOverlay";
+pub const RELOAD_CONFIG_MSG: &str = "OnAir.ReloadConfig";
+pub const BEGIN_CAPTURE_MSG: &str = "OnAir.BeginCapture";
 pub const WM_TRAY: u32 = 1024 + 1; // WM_APP + 1
 pub const WM_KEY_CAPTURED: u32 = 1024 + 3; // WM_APP + 3, capture result
 pub const WM_KEY_DOWN: u32 = 1024 + 4; // WM_APP + 4, bind pressed (wparam=kind, lparam=code)
@@ -11,6 +14,12 @@ pub const TIMER_POLL: usize = 1;
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Register a private inter-process window message. Returns 0 on failure.
+pub fn register_message(name: &str) -> u32 {
+    let wide = to_wide(name);
+    unsafe { RegisterWindowMessageW(PCWSTR(wide.as_ptr())) }
 }
 
 // True while one of apply_pos/apply_topmost/apply_lock below is running.

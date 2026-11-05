@@ -45,6 +45,8 @@ struct AppState {
     // Raw A/B states saved on key-down in switch mode.
     hold_saved_switch: Option<(bool, bool)>,
     hold_down_at: Option<std::time::Instant>,
+    reload_msg: u32,
+    capture_msg: u32,
 }
 
 static mut APP: Option<AppState> = None;
@@ -90,7 +92,7 @@ fn redraw_locked() {
             a.cfg.opacity,
             a.cfg.locked,
             a.cfg.color_bg,
-            a.cfg.dot_color(&a.mic),
+            vm::dot_color(&a.cfg, &a.mic),
             a.cfg.visual_style,
             a.cfg.bg_opacity,
         )
@@ -107,7 +109,7 @@ fn refresh_tray() {
         let a = app_mut();
         (a.hwnd, a.cfg.clone(), a.mic.clone(), a.cfg.color_bg)
     };
-    let dot = cfg_clone.dot_color(&mic_clone);
+    let dot = vm::dot_color(&cfg_clone, &mic_clone);
     let new_icon = render::make_tray_icon(dot, bg);
     let tip = tray::tooltip_text(&cfg_clone, &mic_clone);
     // Swap icons (destroy old after modify to avoid flicker using null)
@@ -443,7 +445,9 @@ fn apply_all_after_config_change() {
     do_poll_and_update();
     redraw_locked();
     refresh_tray();
-    let _ = app_mut().cfg.save();
+    // Deliberately no full-file save here: onair-settings preserves comments
+    // and unknown keys, and rewriting the file on reload would discard them.
+    // Geometry nudges are persisted by the next drag/command/exit save.
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -455,7 +459,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let a = app_mut();
             (a.cfg.clone(), a.mic.clone(), a.cfg.color_bg)
         };
-        let dot = cfg_c.dot_color(&mic_c);
+        let dot = vm::dot_color(&cfg_c, &mic_c);
         let icon = render::make_tray_icon(dot, bg);
         let tip = tray::tooltip_text(&cfg_c, &mic_c);
         if let Some(ic) = icon {
@@ -470,6 +474,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cur = app_mut().tray_icon.unwrap_or_default();
         tray::add_tray(hwnd, if cur.is_invalid() { None } else { Some(cur) }, &tip);
         app_mut().tray_ready = true;
+        return LRESULT(0);
+    }
+
+    // Private messages from onair-settings.exe. Registered at startup so the
+    // two processes agree on the numeric IDs without sharing a header.
+    let (reload_msg, capture_msg) = unsafe {
+        APP.as_ref()
+            .map(|a| (a.reload_msg, a.capture_msg))
+            .unwrap_or((0, 0))
+    };
+    if reload_msg != 0 && msg == reload_msg {
+        if unsafe { APP.is_some() } {
+            restore_hold_if_held();
+            let cfg = AppConfig::load();
+            app_mut().cfg = cfg;
+            apply_all_after_config_change();
+        }
+        return LRESULT(0);
+    }
+    if capture_msg != 0 && msg == capture_msg {
+        if unsafe { APP.is_some() } {
+            restore_hold_if_held();
+            begin_capture();
+        }
         return LRESULT(0);
     }
 
@@ -1022,6 +1050,8 @@ fn main() {
         let hwnd = hwnd.unwrap();
 
         let taskbar_msg = tray::taskbar_created_msg();
+        let reload_msg = window::register_message(window::RELOAD_CONFIG_MSG);
+        let capture_msg = window::register_message(window::BEGIN_CAPTURE_MSG);
         let vm = VmClient::new();
         // Initial unknown until first poll; do one poll now for fast startup paint.
         APP = Some(AppState {
@@ -1038,6 +1068,8 @@ fn main() {
             hold_saved_on: None,
             hold_saved_switch: None,
             hold_down_at: None,
+            reload_msg,
+            capture_msg,
         });
 
         // First poll + paint before showing (avoids gray flash when VM running? still gray on miss)
@@ -1055,7 +1087,7 @@ fn main() {
         // the initial icon here, then enable updates.
         {
             let a = app_mut();
-            let dot = a.cfg.dot_color(&a.mic);
+            let dot = vm::dot_color(&a.cfg, &a.mic);
             let icon = render::make_tray_icon(dot, a.cfg.color_bg);
             let tip = tray::tooltip_text(&a.cfg, &a.mic);
             if let Some(ic) = icon {

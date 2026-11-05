@@ -3,6 +3,8 @@ use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::System::Registry::*;
 
+use onair_config::AppConfig;
+
 // Verified against official VB-Audio "Voicemeeter Remote API" doc + VoicemeeterRemote.h:
 //   long __stdcall VBVMR_Login(void);            // 0 OK, 1 OK but app not running, <0 error
 //   long __stdcall VBVMR_Logout(void);           // 0 ok
@@ -20,6 +22,15 @@ pub enum MicState {
     On,
     Off,
     Unknown(String),
+}
+
+/// Display color for the current mic state.
+pub fn dot_color(cfg: &AppConfig, state: &MicState) -> (u8, u8, u8) {
+    match state {
+        MicState::On => cfg.color_on,
+        MicState::Off => cfg.color_off,
+        MicState::Unknown(_) => cfg.color_unknown,
+    }
 }
 
 pub struct VmClient {

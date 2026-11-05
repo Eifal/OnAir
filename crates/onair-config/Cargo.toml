@@ -1,0 +1,9 @@
+[package]
+name = "onair-config"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Shared configuration for the OnAir overlay and settings app"
+license = "MIT"
+
+[dependencies]

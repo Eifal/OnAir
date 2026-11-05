@@ -1,0 +1,117 @@
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked;
+
+    width: 72px;
+    height: 36px;
+    border-radius: 8px;
+    background: root.selected ? #2ECC71 : #181A1F;
+    border-width: 1px;
+    border-color: root.selected ? #2ECC71 : #2A2D34;
+
+    Text {
+        text: root.label;
+        color: root.selected ? #08110B : #E7EAF0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-weight: 600;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    states [
+        hover when ta.has-hover: {
+            background: root.selected ? #35D97E : #20232A;
+        }
+    ]
+}
+
+export component AppWindow inherits Window {
+    title: "OnAir Settings";
+    preferred-width: 460px;
+    preferred-height: 320px;
+    min-width: 420px;
+    min-height: 300px;
+    background: #0E0F12;
+    default-font-family: "Segoe UI Variable";
+    default-font-size: 14px;
+
+    in property <int> size-value: 48;
+    in property <bool> overlay-running: true;
+    in property <string> status-text: "";
+    callback set-size(int);
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 16px;
+
+        Text {
+            text: "OnAir Settings";
+            color: #F2F4F7;
+            font-size: 22px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: "Overlay size";
+            color: #E7EAF0;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: "Changes apply to the overlay immediately.";
+            color: #9AA1AD;
+            font-size: 12px;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Chip {
+                label: "48";
+                selected: root.size-value == 48;
+                clicked => { root.set-size(48); }
+            }
+            Chip {
+                label: "96";
+                selected: root.size-value == 96;
+                clicked => { root.set-size(96); }
+            }
+            Chip {
+                label: "128";
+                selected: root.size-value == 128;
+                clicked => { root.set-size(128); }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        Rectangle {
+            height: 36px;
+            border-radius: 8px;
+            background: root.overlay-running ? #12251A : #2A2114;
+            border-width: 1px;
+            border-color: root.overlay-running ? #1E4A2D : #5A4720;
+            Text {
+                text: root.overlay-running ? "Overlay connected" : "OnAir is not running - changes apply next launch";
+                color: root.overlay-running ? #7FE0A8 : #E8C67A;
+                font-size: 12px;
+                vertical-alignment: center;
+                x: 12px;
+            }
+        }
+
+        Text {
+            text: root.status-text;
+            color: #9AA1AD;
+            font-size: 12px;
+            height: 16px;
+        }
+    }
+}
