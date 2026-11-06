@@ -585,6 +585,10 @@ fn main() -> Result<(), slint::PlatformError> {
             drop(state);
             ui.set_capture_active(false);
             ui.set_capture_message("Hotkey cleared.".into());
+            // write_edits does not refresh UI properties; update the
+            // visible bind here so the "Current bind" readout clears too.
+            ui.set_toggle_key("None".into());
+            ui.set_toggle_key_set(false);
             write_edits(&ui, &[(ConfigKey::ToggleKey, "None".into())], true);
         });
     }
