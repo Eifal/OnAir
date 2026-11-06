@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master, "fix/**"]
+    branches: [main, master, "fix/**", development]
   pull_request:
 
 permissions:
@@ -19,25 +19,37 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Release build
         run: cargo build --release --locked
-      - name: Upload release binary
+      - name: Upload release binaries
         uses: actions/upload-artifact@v7
         with:
           name: onair-windows-x64
-          path: target/release/onair.exe
+          path: |
+            target/release/onair.exe
+            target/release/onair-settings.exe
           if-no-files-found: error
           retention-days: 14
 
-  msrv:
-    name: MSRV 1.85
+  msrv-overlay:
+    name: MSRV 1.85 (overlay + shared config)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Test on MSRV
-        run: cargo test --locked
+        run: cargo test -p onair -p onair-config --locked
+
+  msrv-settings:
+    name: MSRV 1.92 (settings window, Slint requirement)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Test on MSRV
+        run: cargo test -p onair-settings --locked
