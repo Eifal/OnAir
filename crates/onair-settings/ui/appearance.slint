@@ -19,6 +19,7 @@ export component AppearancePage inherits Rectangle {
     in property <color> preview-color-bg: #141414;
     callback apply-now(string, string);
     callback apply-later(string, string);
+    callback open-picker(string);
 
     property <int> preview-state: 0;
     width: 100%;
@@ -101,6 +102,7 @@ export component AppearancePage inherits Rectangle {
                     invalid: root.color-bg-invalid;
                     edited(t) => { root.apply-later("color_bg", t); }
                     accepted(t) => { root.apply-now("color_bg", t); }
+                    pick => { root.open-picker("color_bg"); }
                 }
             }
         }
@@ -123,6 +125,7 @@ export component AppearancePage inherits Rectangle {
                     invalid: root.color-on-invalid;
                     edited(t) => { root.apply-later("color_on", t); }
                     accepted(t) => { root.apply-now("color_on", t); }
+                    pick => { root.open-picker("color_on"); }
                 }
             }
             Rectangle { height: 1px; background: Theme.border; }
@@ -140,6 +143,7 @@ export component AppearancePage inherits Rectangle {
                     invalid: root.color-off-invalid;
                     edited(t) => { root.apply-later("color_off", t); }
                     accepted(t) => { root.apply-now("color_off", t); }
+                    pick => { root.open-picker("color_off"); }
                 }
             }
             Rectangle { height: 1px; background: Theme.border; }
@@ -157,6 +161,7 @@ export component AppearancePage inherits Rectangle {
                     invalid: root.color-unknown-invalid;
                     edited(t) => { root.apply-later("color_unknown", t); }
                     accepted(t) => { root.apply-now("color_unknown", t); }
+                    pick => { root.open-picker("color_unknown"); }
                 }
             }
         }

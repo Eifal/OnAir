@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod ipc;
+mod picker;
 mod theme;
 mod window_style;
 
@@ -284,13 +285,7 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
     }
 }
 
-#[derive(Clone, Copy)]
-enum ColorField {
-    On,
-    Off,
-    Unknown,
-    Background,
-}
+use picker::ColorField;
 
 fn normalize_color(ui: &AppWindow, value: &str, field: ColorField) -> Result<String, String> {
     let raw = value.trim().trim_start_matches('#');
@@ -463,6 +458,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let cfg = AppConfig::load();
     let ui = AppWindow::new()?;
+    ui.set_disc_image(picker::disc_image());
     push_config(&ui, &cfg);
     ui.set_overlay_running(ipc::overlay_running());
 
@@ -471,6 +467,7 @@ fn main() -> Result<(), slint::PlatformError> {
         capture_started: None,
         capture_baseline: cfg.toggle_key,
     }));
+    let picker = Rc::new(RefCell::new(None::<picker::PickerState>));
 
     {
         let weak = ui.as_weak();
@@ -540,6 +537,112 @@ fn main() -> Result<(), slint::PlatformError> {
                     show_toast(&ui, format!("Couldn't open {}.", folder.display()), true);
                 }
             }
+        });
+    }
+
+    // Open the colour picker for one of the four Appearance colour
+    // fields. Pending edits are flushed first so the wheel starts
+    // from the value that is on disk, not a stale one.
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let picker = picker.clone();
+        ui.on_open_picker(move |key| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(field) = picker::parse_target(&key) else {
+                show_toast(&ui, "Unknown colour field.", true);
+                return;
+            };
+            flush_pending(&ui, &state);
+            let hex = picker::canonical_hex(field);
+            let state_value = picker::PickerState::from_hex(field, &hex).unwrap_or_else(|| {
+                picker::PickerState::from_hex(field, picker::default_hex(field))
+                    .expect("built-in default is a valid colour")
+            });
+            {
+                *picker.borrow_mut() = Some(state_value);
+            }
+            let borrowed = picker.borrow();
+            if let Some(value) = borrowed.as_ref() {
+                picker::push_props(&ui, value);
+            }
+            ui.set_picker_open(true);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_disc_pointer(move |x, y| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            let (h, s) = picker::pick_disc(x, y);
+            value.h = h;
+            value.s = s;
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_value_pointer(move |y| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            value.v = picker::value_from_y(y);
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_reset(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            *value = value.reset();
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_cancel(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            picker.borrow_mut().take();
+            ui.set_picker_open(false);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        let state = state.clone();
+        ui.on_picker_use(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let taken = picker.borrow_mut().take();
+            let Some(value) = taken else {
+                ui.set_picker_open(false);
+                return;
+            };
+            ui.set_picker_open(false);
+            apply_edit(
+                &ui,
+                &state,
+                picker::field_key(value.field),
+                &value.hex(),
+                true,
+            );
         });
     }
 

@@ -2,6 +2,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 export { Theme } from "theme.slint";
 import { Button, NavItem } from "components.slint";
+import { ColorPicker } from "colorpicker.slint";
 import { GeneralPage } from "general.slint";
 import { AppearancePage } from "appearance.slint";
 import { VoicemeeterPage } from "voicemeeter.slint";
@@ -26,6 +27,18 @@ export component AppWindow inherits Window {
     in-out property <string> toast-text: "";
     in property <bool> toast-error: false;
     in-out property <bool> edit-pending: false;
+    // Colour picker overlay (Appearance page). Rust owns the HSV state
+    // and feeds it back here; Slint only renders and forwards gestures.
+    in-out property <bool> picker-open: false;
+    in property <string> picker-title: "Choose colour";
+    in property <string> picker-hex: "2ECC71";
+    in property <color> picker-preview: #2ECC71;
+    in property <bool> picker-preview-dark: false;
+    in property <color> picker-value-top: #FFFFFF;
+    in-out property <float> picker-value: 1.0;
+    in property <float> picker-marker-x: 0;
+    in property <float> picker-marker-y: 0;
+    in property <image> disc-image;
 
     in-out property <int> size-value: 48;
     in-out property <int> opacity-value: 90;
@@ -78,6 +91,12 @@ export component AppWindow inherits Window {
     callback clear-key;
     callback poll-backend;
     callback flush-edits;
+    callback open-picker(string);
+    callback picker-disc-pointer(float, float);
+    callback picker-value-pointer(float);
+    callback picker-reset();
+    callback picker-cancel();
+    callback picker-use();
 
     property <string> page-title: root.current-page == 0 ? "General"
         : root.current-page == 1 ? "Appearance"
@@ -403,6 +422,7 @@ export component AppWindow inherits Window {
                         preview-color-bg: root.preview-color-bg;
                         apply-now(k, v) => { root.apply-now(k, v); }
                         apply-later(k, v) => { root.apply-later(k, v); }
+                        open-picker(k) => { root.open-picker(k); }
                     }
 
                     if root.current-page == 2: VoicemeeterPage {
@@ -478,6 +498,23 @@ export component AppWindow inherits Window {
             wrap: word-wrap;
             overflow: elide;
         }
+    }
+
+    if root.picker-open: ColorPicker {
+        title: root.picker-title;
+        disc-image: root.disc-image;
+        hex-label: root.picker-hex;
+        preview: root.picker-preview;
+        preview-dark: root.picker-preview-dark;
+        value-top: root.picker-value-top;
+        value <=> root.picker-value;
+        marker-x: root.picker-marker-x;
+        marker-y: root.picker-marker-y;
+        disc-pointer(x, y) => { root.picker-disc-pointer(x, y); }
+        value-pointer(y) => { root.picker-value-pointer(y); }
+        reset => { root.picker-reset(); }
+        cancel => { root.picker-cancel(); }
+        use => { root.picker-use(); }
     }
 
     capture-timer := Timer {

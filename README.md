@@ -98,8 +98,9 @@ Pages:
 - **General** – size, opacity, lock position, always on top, tray menu
   style (Glass acrylic / Native Win32).
 - **Appearance** – visual style (Dot/Ring/Bar/Mini), background opacity,
-  colours (on/off/unknown/background) with hex validation, and a live
-  on-screen preview with a pulse animation.
+  colours (on/off/unknown/background) with hex validation or a click-to-open
+  HSV colour wheel (hue/saturation disc + value slider, Reset to defaults),
+  and a live on-screen preview with a pulse animation.
 - **Voicemeeter** – toggle vs two-button switch mode, primary/secondary
   parameter with strip/button dropdowns or a raw "Custom" value, invert,
   poll interval.

@@ -1,0 +1,186 @@
+import { Theme } from "theme.slint";
+import { Button } from "components.slint";
+
+// A self-contained colour picker overlay. The app shows it while
+// `picker-open` is true, covering the whole window with a dimmed
+// backdrop; clicking the backdrop or Cancel discards the change.
+// Rust owns the HSV state and feeds it back through these properties.
+
+global PickerTokens {
+    in property <length> disc-size: 176px;
+    in property <length> disc-radius: 84px;
+    in property <length> ring-diameter: 16px;
+}
+
+export component ColorPicker inherits Rectangle {
+    in property <string> title: "Choose colour";
+    in property <image> disc-image;
+    in property <string> hex-label: "2ECC71";
+    in property <color> preview: #808080;
+    in property <bool> preview-dark: false;
+    in property <color> value-top: #FFFFFF;
+    in property <float> value: 1.0;
+    in property <float> marker-x: 0;
+    in property <float> marker-y: 0;
+    in property <float> marker-radius: 1;
+
+    callback disc-pointer(float, float);
+    callback value-pointer(float);
+    callback reset();
+    callback cancel();
+    callback use();
+
+    background: #00000070;
+
+    backdrop := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.cancel(); }
+    }
+
+    dialog := Rectangle {
+        width: 344px;
+        height: 428px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: Theme.radius-lg;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+
+        // Swallow stray clicks so the backdrop does not dismiss the
+        // dialog while the user is adjusting it.
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { }
+        }
+
+        VerticalLayout {
+            x: 16px;
+            y: 16px;
+            width: parent.width - 32px;
+            height: parent.height - 32px;
+            spacing: 12px;
+
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.font-card-title;
+                font-weight: 600;
+            }
+
+            Rectangle {
+                height: 54px;
+                border-radius: Theme.radius-md;
+                background: root.preview;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+
+                Text {
+                    text: "#" + root.hex-label;
+                    color: root.preview-dark ? #FFFFFF : #101318;
+                    font-size: 17px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                cross-axis-alignment: center;
+
+                disc := Rectangle {
+                    width: PickerTokens.disc-size;
+                    height: PickerTokens.disc-size;
+
+                    Image {
+                        source: root.disc-image;
+                        width: 100%;
+                        height: 100%;
+                    }
+
+                    ring := Rectangle {
+                        width: PickerTokens.ring-diameter;
+                        height: PickerTokens.ring-diameter;
+                        border-radius: PickerTokens.ring-diameter / 2;
+                        border-width: 2px;
+                        border-color: #FFFFFF;
+                        background: transparent;
+                        x: PickerTokens.disc-size / 2 + root.marker-x * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
+                        y: PickerTokens.disc-size / 2 + root.marker-y * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        moved => {
+                            root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
+                        }
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down {
+                                root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
+                            }
+                        }
+                    }
+                }
+
+                value-strip := Rectangle {
+                    width: 22px;
+                    height: PickerTokens.disc-size;
+                    border-radius: 11px;
+                    background: @linear-gradient(180deg, root.value-top 0%, #000000 100%);
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+
+                    Rectangle {
+                        x: -4px;
+                        y: (1.0 - root.value) * parent.height - 1.25px;
+                        width: parent.width + 8px;
+                        height: 2.5px;
+                        border-radius: 1.25px;
+                        background: #FFFFFF;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        moved => {
+                            root.value-pointer(self.mouse-y / 1px);
+                        }
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down {
+                                root.value-pointer(self.mouse-y / 1px);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { vertical-stretch: 1; background: transparent; }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Button {
+                    text: "Reset";
+                    kind: "ghost";
+                    clicked => { root.reset(); }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+                Button {
+                    text: "Cancel";
+                    kind: "secondary";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: "Use colour";
+                    kind: "primary";
+                    clicked => { root.use(); }
+                }
+            }
+        }
+    }
+}
