@@ -364,6 +364,9 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     width: 100%;
+                    // Reserve a gutter for the scrollbar so it never
+                    // overlaps the cards or columns behind it.
+                    padding-right: 14px;
                     padding-bottom: 24px;
 
                     if root.current-page == 0: GeneralPage {
