@@ -1,0 +1,164 @@
+import { Theme } from "theme.slint";
+import { Button, Card, SettingBlock } from "components.slint";
+
+export component AboutPage inherits Rectangle {
+    in property <string> version: "";
+    in property <string> config-path: "";
+    in property <bool> overlay-running: false;
+    callback open-config;
+    callback open-folder;
+
+    width: 100%;
+    height: content.preferred-height + 4px;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "";
+            subtitle: "";
+
+            HorizontalLayout {
+                spacing: 18px;
+                cross-axis-alignment: center;
+
+                Rectangle {
+                    width: 64px;
+                    height: 64px;
+                    border-radius: 18px;
+                    background: Theme.accent;
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        x: 20px;
+                        y: 20px;
+                        border-radius: 12px;
+                        background: Theme.accent-text;
+                    }
+                    Rectangle {
+                        width: 12px;
+                        height: 5px;
+                        x: 26px;
+                        y: 39px;
+                        border-radius: 3px;
+                        background: Theme.accent;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+                    Text {
+                        text: "OnAir";
+                        color: Theme.text;
+                        font-size: 28px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Microphone state overlay for Voicemeeter";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-body;
+                    }
+                    Text {
+                        text: "Version \{root.version}  ·  Windows 10/11 x64";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-caption;
+                    }
+                }
+            }
+        }
+
+        Card {
+            title: "Settings";
+            subtitle: "A separate Slint window that edits the overlay's config.ini.";
+
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Configuration file";
+                    description: root.config-path;
+                }
+                Button {
+                    text: "Open file";
+                    kind: "secondary";
+                    clicked => { root.open-config(); }
+                }
+                Button {
+                    text: "Open folder";
+                    kind: "ghost";
+                    clicked => { root.open-folder(); }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Overlay status";
+                    description: root.overlay-running
+                        ? "OnAir is running; edits reload live."
+                        : "OnAir is not running; edits are saved for the next launch.";
+                }
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: root.overlay-running ? Theme.success : Theme.warning;
+                }
+            }
+        }
+
+        Card {
+            title: "Built with Slint";
+            subtitle: "The settings UI is compiled from .slint files with the winit backend and software renderer.";
+
+            Text {
+                // Keep in sync with the `slint` dependency in Cargo.toml.
+                text: "Slint 1.18.1 · slint.dev";
+                color: Theme.text;
+                font-size: Theme.font-body;
+                font-weight: 600;
+            }
+            Text {
+                text: "Slint is copyright © Slint GmbH and contributors. It is available under GPL-3.0 or commercial/royalty-free terms; see slint.dev for the exact license terms. This application does not bundle third-party icon assets.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            Text {
+                text: "If you redistribute onair-settings.exe, review the Slint license and include the corresponding source or commercial license as required.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+
+        Card {
+            title: "Privacy";
+            subtitle: "Local-only by design.";
+
+            Text {
+                text: "No telemetry, no network access, no autostart entry and no administrator rights. The settings window and overlay talk only through registered window messages on the local desktop.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "The window theme follows the Windows app theme setting. The overlay and settings store nothing outside config.ini.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+
+        Text {
+            text: "OnAir is licensed under MIT. Voicemeeter is a product of VB-Audio.";
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            horizontal-alignment: center;
+        }
+    }
+}

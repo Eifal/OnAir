@@ -1,0 +1,130 @@
+import { Theme } from "theme.slint";
+import { Card, RowSlider, RowSegmented, RowSwitch, SettingBlock, VmSource } from "components.slint";
+
+export component VoicemeeterPage inherits Rectangle {
+    in-out property <string> vm-mode: "toggle";
+    in-out property <string> vm-param: "Strip[0].B2";
+    in-out property <string> vm-param-b: "Strip[0].B1";
+    in-out property <int> vm-strip: 1;
+    in-out property <int> vm-strip-b: 1;
+    in-out property <string> vm-button: "B2";
+    in-out property <string> vm-button-b: "B1";
+    in property <bool> vm-param-custom: false;
+    in property <bool> vm-param-b-custom: false;
+    in property <bool> vm-param-invalid: false;
+    in property <bool> vm-param-b-invalid: false;
+    in-out property <int> poll-ms: 100;
+    in-out property <bool> invert: false;
+    callback apply-now(string, string);
+    callback apply-later(string, string);
+
+    width: 100%;
+    height: content.preferred-height + 4px;
+    preferred-height: content.preferred-height + 4px;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "Switch mode";
+            subtitle: "How the hotkey changes Voicemeeter.";
+
+            RowSegmented {
+                title: "Mode";
+                description: "Toggle flips one parameter. Two-button switches between a primary and secondary source.";
+                options: ["Toggle", "Two-button"];
+                current-index: root.vm-mode == "switch" ? 1 : 0;
+                changed(i) => {
+                    root.vm-mode = i == 1 ? "switch" : "toggle";
+                    root.apply-now("vm_mode", root.vm-mode);
+                }
+            }
+        }
+
+        Card {
+            title: "Primary source";
+            subtitle: "The parameter the overlay reads and the hotkey changes.";
+
+            VmSource {
+                heading: "Assignment";
+                description: "Pick a strip and button, or edit the raw parameter for buses, gains and other Voicemeeter fields.";
+                config-key: "vm_param";
+                param <=> root.vm-param;
+                strip <=> root.vm-strip;
+                button <=> root.vm-button;
+                custom: root.vm-param-custom;
+                invalid: root.vm-param-invalid;
+                apply(k, v) => { root.apply-now(k, v); }
+                apply-later(k, v) => { root.apply-later(k, v); }
+            }
+        }
+
+        if root.vm-mode == "switch": Card {
+            title: "Secondary source";
+            subtitle: "The other side of the A/B switch. Exactly one of the two parameters is on after a switch.";
+
+            VmSource {
+                heading: "Assignment";
+                description: "Usually a different bus button on the same or another strip. Custom parameters are allowed.";
+                config-key: "vm_param_b";
+                param <=> root.vm-param-b;
+                strip <=> root.vm-strip-b;
+                button <=> root.vm-button-b;
+                custom: root.vm-param-b-custom;
+                invalid: root.vm-param-b-invalid;
+                apply(k, v) => { root.apply-now(k, v); }
+                apply-later(k, v) => { root.apply-later(k, v); }
+            }
+        }
+
+        Card {
+            title: "Polling and colours";
+            subtitle: "The overlay polls Voicemeeter on a timer and maps its state to the status colour.";
+
+            RowSlider {
+                title: "Poll interval";
+                description: "Lower values react faster but use more CPU.";
+                minimum: 30;
+                maximum: 1000;
+                step: 10;
+                suffix: " ms";
+                value <=> root.poll-ms;
+                changed(v) => { root.apply-later("poll_ms", "\{v}"); }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSwitch {
+                title: "Invert status";
+                description: "Swap the on and off colours without changing Voicemeeter.";
+                checked <=> root.invert;
+                toggled(v) => {
+                    root.invert = v;
+                    root.apply-now("invert", v ? "true" : "false");
+                }
+            }
+        }
+
+        Card {
+            title: "How it works";
+            subtitle: "";
+            Text {
+                text: "OnAir reads the parameter through the Voicemeeter remote API. Settings only edits configuration; it does not connect to Voicemeeter and does not install any hooks.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Toggle mode: hotkey flips vm_param. Two-button mode: hotkey turns vm_param off and vm_param_b on, or the reverse, keeping exactly one active.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Empty parameters reset to the defaults: Strip[0].B2 for the primary source and Strip[0].B1 for the secondary source.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

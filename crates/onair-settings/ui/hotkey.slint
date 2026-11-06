@@ -1,0 +1,151 @@
+import { Theme } from "theme.slint";
+import { Button, Card, RowSegmented, RowSlider } from "components.slint";
+
+export component HotkeyPage inherits Rectangle {
+    in property <string> toggle-key: "None";
+    in property <bool> toggle-key-set: false;
+    in property <bool> overlay-running: false;
+    in property <bool> capture-active: false;
+    in property <string> capture-message: "";
+    in property <int> capture-remaining: 15;
+    in-out property <string> trigger-mode: "toggle";
+    in-out property <int> hold-ms: 300;
+    callback apply-now(string, string);
+    callback apply-later(string, string);
+    callback begin-capture;
+    callback clear-key;
+
+    width: 100%;
+    height: content.preferred-height + 4px;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "Global hotkey";
+            subtitle: "The overlay listens for this bind, even while another application is focused.";
+
+            Rectangle {
+                height: 84px;
+                border-radius: Theme.radius-md;
+                background: root.capture-active ? Theme.accent-soft : Theme.input-bg;
+                border-width: 1px;
+                border-color: root.capture-active ? Theme.accent : Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 4px;
+                    alignment: center;
+                    Text {
+                        text: root.capture-active ? "CAPTURING" : "CURRENT BIND";
+                        color: root.capture-active ? Theme.accent : Theme.text-muted;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                    }
+                    Text {
+                        text: root.toggle-key;
+                        color: Theme.text;
+                        font-size: 24px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                cross-axis-alignment: center;
+                Button {
+                    text: root.capture-active ? "Waiting..." : "Capture key";
+                    kind: "primary";
+                    enabled: root.overlay-running && !root.capture-active;
+                    clicked => { root.begin-capture(); }
+                }
+                Button {
+                    text: "Clear";
+                    kind: "secondary";
+                    enabled: root.toggle-key-set && !root.capture-active;
+                    clicked => { root.clear-key(); }
+                }
+                Text {
+                    text: root.overlay-running ? "Overlay connected" : "OnAir is not running";
+                    color: root.overlay-running ? Theme.success : Theme.warning;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.capture-active: Text {
+                text: "Listening… press any key or mouse button. \{root.capture-remaining}s remaining. Esc in the overlay cancels.";
+                color: Theme.accent;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            if !root.capture-active && root.capture-message != "": Text {
+                text: root.capture-message;
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            if !root.capture-active && root.capture-message == "": Text {
+                text: "Press Capture key, then use the key or mouse button you want to bind.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+
+        Card {
+            title: "Trigger behaviour";
+            subtitle: "Choose whether the bind toggles, acts as push-to-talk, or both.";
+
+            RowSegmented {
+                title: "Mode";
+                description: "Toggle flips on key-down. Hold forces the mic on while pressed. Both taps to toggle and holds momentarily.";
+                options: ["Toggle", "Hold", "Both"];
+                current-index: root.trigger-mode == "hold" ? 1 : (root.trigger-mode == "both" ? 2 : 0);
+                changed(i) => {
+                    root.trigger-mode = i == 1 ? "hold" : (i == 2 ? "both" : "toggle");
+                    root.apply-now("trigger_mode", root.trigger-mode);
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSlider {
+                title: "Hold/tap threshold";
+                description: "In Both mode, a press shorter than this toggles; a longer press is momentary. Ignored by Toggle and Hold.";
+                minimum: 100;
+                maximum: 2000;
+                step: 10;
+                suffix: " ms";
+                value <=> root.hold-ms;
+                changed(v) => { root.apply-later("hold_tap_ms", "\{v}"); }
+            }
+        }
+
+        Card {
+            title: "Capture notes";
+            subtitle: "";
+
+            Text {
+                text: "• Mouse buttons work too: left, right, middle, X1 and X2 are captured by the overlay's low-level hook.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "• The settings window never installs input hooks. It asks the running overlay to capture and then polls config.ini about every 300 ms for up to 15 seconds.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "• If OnAir is not running, start it first. Changes made here are still saved and take effect on the next launch.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

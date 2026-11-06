@@ -23,7 +23,7 @@ pub fn notify_reload() -> bool {
     post_to_overlay(RELOAD_MSG)
 }
 
-#[allow(dead_code)] // wired to the Hotkey page in phase 2
+#[allow(dead_code)]
 pub fn notify_begin_capture() -> bool {
     post_to_overlay(BEGIN_CAPTURE_MSG)
 }

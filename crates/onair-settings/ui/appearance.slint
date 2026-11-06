@@ -1,0 +1,171 @@
+import { Theme } from "theme.slint";
+import { Card, ColorField, PreviewPanel, RowSlider, SettingBlock, VisualCard } from "components.slint";
+
+export component AppearancePage inherits Rectangle {
+    in property <int> size-value: 48;
+    in-out property <string> visual-style: "dot";
+    in-out property <int> bg-opacity-value: 90;
+    in-out property <string> color-on: "2ECC71";
+    in-out property <string> color-off: "E74C3C";
+    in-out property <string> color-unknown: "808080";
+    in-out property <string> color-bg: "141414";
+    in property <bool> color-on-invalid: false;
+    in property <bool> color-off-invalid: false;
+    in property <bool> color-unknown-invalid: false;
+    in property <bool> color-bg-invalid: false;
+    in property <color> preview-color-on: #2ECC71;
+    in property <color> preview-color-off: #E74C3C;
+    in property <color> preview-color-unknown: #808080;
+    in property <color> preview-color-bg: #141414;
+    callback apply-now(string, string);
+    callback apply-later(string, string);
+
+    property <int> preview-state: 0;
+    width: 100%;
+    height: content.preferred-height + 4px;
+    preferred-height: content.preferred-height + 4px;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "Overlay style";
+            subtitle: "The window keeps a square hit area for dragging; only the drawing changes.";
+
+            HorizontalLayout {
+                spacing: 10px;
+                for option[idx] in Theme.visual-options: VisualCard {
+                    horizontal-stretch: 1;
+                    option-title: option;
+                    style-name: Theme.visual-values[idx];
+                    selected: root.visual-style == Theme.visual-values[idx];
+                    clicked => {
+                        root.visual-style = Theme.visual-values[idx];
+                        root.apply-now("visual_style", root.visual-style);
+                    }
+                }
+            }
+        }
+
+        Card {
+            title: "Live preview";
+            subtitle: "A scale model of the overlay. Use Pulse to preview the change animation.";
+
+            PreviewPanel {
+                size-value: root.size-value;
+                bg-opacity: root.bg-opacity-value;
+                visual-style: root.visual-style;
+                state: root.preview-state;
+                color-on: root.preview-color-on;
+                color-off: root.preview-color-off;
+                color-unknown: root.preview-color-unknown;
+                color-bg: root.preview-color-bg;
+                state-changed(s) => { root.preview-state = s; }
+            }
+
+            Text {
+                text: "Preview is illustrative; the real overlay follows the configured size and opacity.";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+            }
+        }
+
+        Card {
+            title: "Background";
+            subtitle: "The rounded square behind the status shape.";
+
+            RowSlider {
+                title: "Background opacity";
+                description: "0% hides the square; Mini style never draws it.";
+                minimum: 0;
+                maximum: 100;
+                step: 1;
+                suffix: "%";
+                value <=> root.bg-opacity-value;
+                changed(v) => { root.apply-later("bg_opacity", "\{v}"); }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Background color";
+                    description: "Six-digit hex, with or without #.";
+                }
+                ColorField {
+                    width: 164px;
+                    text <=> root.color-bg;
+                    swatch: root.preview-color-bg;
+                    invalid: root.color-bg-invalid;
+                    edited(t) => { root.apply-later("color_bg", t); }
+                    accepted(t) => { root.apply-now("color_bg", t); }
+                }
+            }
+        }
+
+        Card {
+            title: "Status colors";
+            subtitle: "Used for the on, off and unknown/muted states.";
+
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "On";
+                    description: "Microphone / parameter is active.";
+                }
+                ColorField {
+                    width: 164px;
+                    text <=> root.color-on;
+                    swatch: root.preview-color-on;
+                    invalid: root.color-on-invalid;
+                    edited(t) => { root.apply-later("color_on", t); }
+                    accepted(t) => { root.apply-now("color_on", t); }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Off";
+                    description: "Microphone / parameter is inactive.";
+                }
+                ColorField {
+                    width: 164px;
+                    text <=> root.color-off;
+                    swatch: root.preview-color-off;
+                    invalid: root.color-off-invalid;
+                    edited(t) => { root.apply-later("color_off", t); }
+                    accepted(t) => { root.apply-now("color_off", t); }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Unknown";
+                    description: "Voicemeeter is not available or the state is muted.";
+                }
+                ColorField {
+                    width: 164px;
+                    text <=> root.color-unknown;
+                    swatch: root.preview-color-unknown;
+                    invalid: root.color-unknown-invalid;
+                    edited(t) => { root.apply-later("color_unknown", t); }
+                    accepted(t) => { root.apply-now("color_unknown", t); }
+                }
+            }
+        }
+
+        Text {
+            text: "The settings window follows the Windows app theme. Light mode uses the same palette with adjusted contrast.";
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            horizontal-alignment: center;
+        }
+    }
+}

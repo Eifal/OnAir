@@ -1,117 +1,503 @@
-component Chip inherits Rectangle {
-    in property <string> label;
-    in property <bool> selected: false;
-    callback clicked;
-
-    width: 72px;
-    height: 36px;
-    border-radius: 8px;
-    background: root.selected ? #2ECC71 : #181A1F;
-    border-width: 1px;
-    border-color: root.selected ? #2ECC71 : #2A2D34;
-
-    Text {
-        text: root.label;
-        color: root.selected ? #08110B : #E7EAF0;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        font-weight: 600;
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-
-    states [
-        hover when ta.has-hover: {
-            background: root.selected ? #35D97E : #20232A;
-        }
-    ]
-}
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+export { Theme } from "theme.slint";
+import { Button, NavItem } from "components.slint";
+import { GeneralPage } from "general.slint";
+import { AppearancePage } from "appearance.slint";
+import { VoicemeeterPage } from "voicemeeter.slint";
+import { HotkeyPage } from "hotkey.slint";
+import { AboutPage } from "about.slint";
 
 export component AppWindow inherits Window {
     title: "OnAir Settings";
-    preferred-width: 460px;
-    preferred-height: 320px;
-    min-width: 420px;
-    min-height: 300px;
-    background: #0E0F12;
-    default-font-family: "Segoe UI Variable";
+    preferred-width: 1000px;
+    preferred-height: 760px;
+    min-width: 880px;
+    min-height: 620px;
+    background: Theme.window-bg;
+    default-font-family: Theme.font-family;
     default-font-size: 14px;
 
-    in property <int> size-value: 48;
+    in-out property <int> current-page: 0;
+
     in property <bool> overlay-running: true;
-    in property <string> status-text: "";
-    callback set-size(int);
+    in property <string> version: "";
+    in property <string> config-path: "";
+    in-out property <string> toast-text: "";
+    in property <bool> toast-error: false;
+    in-out property <bool> edit-pending: false;
 
-    VerticalLayout {
-        padding: 24px;
-        spacing: 16px;
+    in-out property <int> size-value: 48;
+    in-out property <int> opacity-value: 90;
+    in-out property <bool> locked: false;
+    in-out property <bool> stay-on-top: true;
+    in-out property <string> menu-style: "glass";
 
-        Text {
-            text: "OnAir Settings";
-            color: #F2F4F7;
-            font-size: 22px;
-            font-weight: 600;
-        }
+    in-out property <string> visual-style: "dot";
+    in-out property <int> bg-opacity-value: 90;
+    in-out property <string> color-on: "2ECC71";
+    in-out property <string> color-off: "E74C3C";
+    in-out property <string> color-unknown: "808080";
+    in-out property <string> color-bg: "141414";
+    in property <bool> color-on-invalid: false;
+    in property <bool> color-off-invalid: false;
+    in property <bool> color-unknown-invalid: false;
+    in property <bool> color-bg-invalid: false;
+    in property <color> preview-color-on: #2ECC71;
+    in property <color> preview-color-off: #E74C3C;
+    in property <color> preview-color-unknown: #808080;
+    in property <color> preview-color-bg: #141414;
 
-        Text {
-            text: "Overlay size";
-            color: #E7EAF0;
-            font-size: 14px;
-            font-weight: 600;
-        }
+    in-out property <string> vm-mode: "toggle";
+    in-out property <string> vm-param: "Strip[0].B2";
+    in-out property <string> vm-param-b: "Strip[0].B1";
+    in-out property <int> vm-strip: 1;
+    in-out property <int> vm-strip-b: 1;
+    in-out property <string> vm-button: "B2";
+    in-out property <string> vm-button-b: "B1";
+    in property <bool> vm-param-custom: false;
+    in property <bool> vm-param-b-custom: false;
+    in property <bool> vm-param-invalid: false;
+    in property <bool> vm-param-b-invalid: false;
+    in-out property <int> poll-ms: 100;
+    in-out property <bool> invert: false;
 
-        Text {
-            text: "Changes apply to the overlay immediately.";
-            color: #9AA1AD;
-            font-size: 12px;
-        }
+    in property <string> toggle-key: "None";
+    in property <bool> toggle-key-set: false;
+    in property <bool> capture-active: false;
+    in property <string> capture-message: "";
+    in property <int> capture-remaining: 15;
+    in-out property <string> trigger-mode: "toggle";
+    in-out property <int> hold-ms: 300;
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: start;
+    callback apply-now(string, string);
+    callback apply-later(string, string);
+    callback open-config;
+    callback open-folder;
+    callback begin-capture;
+    callback clear-key;
+    callback poll-backend;
+    callback flush-edits;
 
-            Chip {
-                label: "48";
-                selected: root.size-value == 48;
-                clicked => { root.set-size(48); }
+    property <string> page-title: root.current-page == 0 ? "General"
+        : root.current-page == 1 ? "Appearance"
+        : root.current-page == 2 ? "Voicemeeter"
+        : root.current-page == 3 ? "Hotkey"
+        : "About";
+    property <string> page-subtitle: root.current-page == 0 ? "Window size, position lock and configuration."
+        : root.current-page == 1 ? "Shape, colours and a live preview of the overlay."
+        : root.current-page == 2 ? "Choose the Voicemeeter parameter OnAir reads and toggles."
+        : root.current-page == 3 ? "Global key capture, trigger behaviour and timing."
+        : "Version, files and privacy.";
+
+    changed current-page => {
+        scroll.content-y = 0px;
+    }
+
+    HorizontalLayout {
+        sidebar := Rectangle {
+            width: 228px;
+            background: Theme.sidebar-bg;
+
+            VerticalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 22px;
+                padding-bottom: 18px;
+                spacing: 0px;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    height: 56px;
+                    spacing: 11px;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 10px;
+                        background: Theme.accent;
+
+                        Rectangle {
+                            width: 13px;
+                            height: 13px;
+                            x: 10px;
+                            y: 10px;
+                            border-radius: 7px;
+                            background: Theme.accent-text;
+                        }
+                        Rectangle {
+                            width: 8px;
+                            height: 3px;
+                            x: 13px;
+                            y: 24px;
+                            border-radius: 2px;
+                            background: Theme.accent;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 0px;
+                        alignment: center;
+                        Text {
+                            text: "OnAir";
+                            color: Theme.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Settings";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            letter-spacing: 0.6px;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                VerticalLayout {
+                    padding-top: 20px;
+                    spacing: 4px;
+
+                    NavItem {
+                        label: "General";
+                        icon-kind: 0;
+                        selected: root.current-page == 0;
+                        clicked => { root.current-page = 0; }
+                    }
+                    NavItem {
+                        label: "Appearance";
+                        icon-kind: 1;
+                        selected: root.current-page == 1;
+                        clicked => { root.current-page = 1; }
+                    }
+                    NavItem {
+                        label: "Voicemeeter";
+                        icon-kind: 2;
+                        selected: root.current-page == 2;
+                        clicked => { root.current-page = 2; }
+                    }
+                    NavItem {
+                        label: "Hotkey";
+                        icon-kind: 3;
+                        selected: root.current-page == 3;
+                        clicked => { root.current-page = 3; }
+                    }
+                    NavItem {
+                        label: "About";
+                        icon-kind: 4;
+                        selected: root.current-page == 4;
+                        clicked => { root.current-page = 4; }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; background: transparent; }
+
+                Rectangle {
+                    height: 68px;
+                    border-radius: Theme.radius-md;
+                    background: root.overlay-running ? Theme.success-soft : Theme.warning-soft;
+                    border-width: 1px;
+                    border-color: root.overlay-running ? Theme.border : Theme.warning;
+
+                    VerticalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 11px;
+                        padding-bottom: 11px;
+                        spacing: 2px;
+                        alignment: center;
+
+                        HorizontalLayout {
+                            spacing: 7px;
+                            cross-axis-alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: root.overlay-running ? Theme.success : Theme.warning;
+                            }
+                            Text {
+                                text: root.overlay-running ? "Overlay running" : "Overlay not running";
+                                color: root.overlay-running ? Theme.success : Theme.warning;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                        }
+                        Text {
+                            text: root.overlay-running
+                                ? "Edits reload live."
+                                : "Edits apply on next launch.";
+                            color: Theme.text-muted;
+                            font-size: 10px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                Rectangle { height: 12px; background: transparent; }
+
+                Text {
+                    text: "OnAir \{root.version}";
+                    color: Theme.text-muted;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
             }
-            Chip {
-                label: "96";
-                selected: root.size-value == 96;
-                clicked => { root.set-size(96); }
-            }
-            Chip {
-                label: "128";
-                selected: root.size-value == 128;
-                clicked => { root.set-size(128); }
-            }
         }
-
-        Rectangle { vertical-stretch: 1; }
 
         Rectangle {
-            height: 36px;
-            border-radius: 8px;
-            background: root.overlay-running ? #12251A : #2A2114;
-            border-width: 1px;
-            border-color: root.overlay-running ? #1E4A2D : #5A4720;
-            Text {
-                text: root.overlay-running ? "Overlay connected" : "OnAir is not running - changes apply next launch";
-                color: root.overlay-running ? #7FE0A8 : #E8C67A;
-                font-size: 12px;
-                vertical-alignment: center;
-                x: 12px;
-            }
+            width: 1px;
+            background: Theme.border;
         }
 
-        Text {
-            text: root.status-text;
-            color: #9AA1AD;
-            font-size: 12px;
-            height: 16px;
+        VerticalLayout {
+            padding-left: 30px;
+            padding-right: 30px;
+            padding-top: 26px;
+
+            HorizontalLayout {
+                spacing: 16px;
+                cross-axis-alignment: center;
+
+                VerticalLayout {
+                    spacing: 3px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.page-title;
+                        color: Theme.text;
+                        font-size: Theme.font-page-title;
+                        font-weight: 700;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.page-subtitle;
+                        color: Theme.text-muted;
+                        font-size: 13px;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    width: 120px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: root.overlay-running ? Theme.success-soft : Theme.warning-soft;
+                    border-width: 1px;
+                    border-color: root.overlay-running ? Theme.success : Theme.warning;
+                    opacity: 0.9;
+
+                    HorizontalLayout {
+                        padding-left: 11px;
+                        padding-right: 11px;
+                        spacing: 6px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 4px;
+                            background: root.overlay-running ? Theme.success : Theme.warning;
+                        }
+                        Text {
+                            text: root.overlay-running ? "Connected" : "Offline";
+                            color: root.overlay-running ? Theme.success : Theme.warning;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 18px; background: transparent; }
+
+            if !root.overlay-running: Rectangle {
+                height: 54px;
+                border-radius: Theme.radius-md;
+                background: Theme.warning-soft;
+                border-width: 1px;
+                border-color: Theme.warning;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 10px;
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "!";
+                        color: Theme.warning;
+                        font-size: 17px;
+                        font-weight: 700;
+                    }
+                    VerticalLayout {
+                        spacing: 1px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "OnAir is not running";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "Changes are still saved to config.ini and apply the next time the overlay starts.";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                    Button {
+                        text: "Check again";
+                        kind: "ghost";
+                        clicked => { root.poll-backend(); }
+                    }
+                }
+            }
+
+            if !root.overlay-running: Rectangle { height: 12px; background: transparent; }
+
+            scroll := ScrollView {
+                vertical-stretch: 1;
+                min-height: 240px;
+
+                VerticalLayout {
+                    width: 100%;
+                    padding-bottom: 24px;
+
+                    if root.current-page == 0: GeneralPage {
+                        width: 100%;
+                        size-value <=> root.size-value;
+                        opacity-value <=> root.opacity-value;
+                        locked <=> root.locked;
+                        always-on-top <=> root.stay-on-top;
+                        menu-style <=> root.menu-style;
+                        config-path: root.config-path;
+                        version: root.version;
+                        apply-now(k, v) => { root.apply-now(k, v); }
+                        apply-later(k, v) => { root.apply-later(k, v); }
+                        open-config => { root.open-config(); }
+                        open-folder => { root.open-folder(); }
+                    }
+
+                    if root.current-page == 1: AppearancePage {
+                        width: 100%;
+                        size-value: root.size-value;
+                        visual-style <=> root.visual-style;
+                        bg-opacity-value <=> root.bg-opacity-value;
+                        color-on <=> root.color-on;
+                        color-off <=> root.color-off;
+                        color-unknown <=> root.color-unknown;
+                        color-bg <=> root.color-bg;
+                        color-on-invalid: root.color-on-invalid;
+                        color-off-invalid: root.color-off-invalid;
+                        color-unknown-invalid: root.color-unknown-invalid;
+                        color-bg-invalid: root.color-bg-invalid;
+                        preview-color-on: root.preview-color-on;
+                        preview-color-off: root.preview-color-off;
+                        preview-color-unknown: root.preview-color-unknown;
+                        preview-color-bg: root.preview-color-bg;
+                        apply-now(k, v) => { root.apply-now(k, v); }
+                        apply-later(k, v) => { root.apply-later(k, v); }
+                    }
+
+                    if root.current-page == 2: VoicemeeterPage {
+                        width: 100%;
+                        vm-mode <=> root.vm-mode;
+                        vm-param <=> root.vm-param;
+                        vm-param-b <=> root.vm-param-b;
+                        vm-strip <=> root.vm-strip;
+                        vm-strip-b <=> root.vm-strip-b;
+                        vm-button <=> root.vm-button;
+                        vm-button-b <=> root.vm-button-b;
+                        vm-param-custom: root.vm-param-custom;
+                        vm-param-b-custom: root.vm-param-b-custom;
+                        vm-param-invalid: root.vm-param-invalid;
+                        vm-param-b-invalid: root.vm-param-b-invalid;
+                        poll-ms <=> root.poll-ms;
+                        invert <=> root.invert;
+                        apply-now(k, v) => { root.apply-now(k, v); }
+                        apply-later(k, v) => { root.apply-later(k, v); }
+                    }
+
+                    if root.current-page == 3: HotkeyPage {
+                        width: 100%;
+                        toggle-key: root.toggle-key;
+                        toggle-key-set: root.toggle-key-set;
+                        overlay-running: root.overlay-running;
+                        capture-active: root.capture-active;
+                        capture-message: root.capture-message;
+                        capture-remaining: root.capture-remaining;
+                        trigger-mode <=> root.trigger-mode;
+                        hold-ms <=> root.hold-ms;
+                        apply-now(k, v) => { root.apply-now(k, v); }
+                        apply-later(k, v) => { root.apply-later(k, v); }
+                        begin-capture => { root.begin-capture(); }
+                        clear-key => { root.clear-key(); }
+                    }
+
+                    if root.current-page == 4: AboutPage {
+                        width: 100%;
+                        version: root.version;
+                        config-path: root.config-path;
+                        overlay-running: root.overlay-running;
+                        open-config => { root.open-config(); }
+                        open-folder => { root.open-folder(); }
+                    }
+                }
+            }
         }
+    }
+
+    Rectangle {
+        width: min(560px, root.width - 80px);
+        height: max(38px, toast-label.preferred-height + 16px);
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 26px;
+        border-radius: Theme.radius-md;
+        background: root.toast-error ? Theme.danger-soft : Theme.surface-raised;
+        border-width: 1px;
+        border-color: root.toast-error ? Theme.danger : Theme.border-strong;
+        opacity: root.toast-text == "" ? 0 : 1;
+        animate opacity { duration: 160ms; }
+
+        toast-label := Text {
+            x: 16px;
+            width: parent.width - 32px;
+            height: 100%;
+            text: root.toast-text;
+            color: root.toast-error ? Theme.danger : Theme.text;
+            font-size: 12px;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    capture-timer := Timer {
+        interval: 300ms;
+        running: root.capture-active;
+        triggered => { root.poll-backend(); }
+    }
+
+    edit-timer := Timer {
+        interval: 150ms;
+        running: root.edit-pending;
+        triggered => { root.flush-edits(); }
+    }
+
+    status-timer := Timer {
+        interval: 1000ms;
+        running: true;
+        triggered => { root.poll-backend(); }
+    }
+
+    toast-timer := Timer {
+        interval: 2800ms;
+        running: root.toast-text != "";
+        triggered => { root.toast-text = ""; }
     }
 }

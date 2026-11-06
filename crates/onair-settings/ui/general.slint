@@ -1,0 +1,143 @@
+import { Theme } from "theme.slint";
+import { Card, Button, RowSlider, RowSwitch, RowSegmented, SettingBlock } from "components.slint";
+
+export component GeneralPage inherits Rectangle {
+    in-out property <int> size-value: 48;
+    in-out property <int> opacity-value: 90;
+    in-out property <bool> locked: false;
+    in-out property <bool> always-on-top: true;
+    in-out property <string> menu-style: "glass";
+    in property <string> config-path: "";
+    in property <string> version: "";
+    callback apply-now(string, string);
+    callback apply-later(string, string);
+    callback open-config;
+    callback open-folder;
+
+    width: 100%;
+    height: content.preferred-height + 4px;
+    preferred-height: content.preferred-height + 4px;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "Overlay";
+            subtitle: "Changes are written to config.ini and applied immediately while OnAir is running.";
+
+            RowSlider {
+                title: "Size";
+                description: "Width and height of the on-screen indicator.";
+                minimum: 16;
+                maximum: 512;
+                step: 1;
+                suffix: " px";
+                value <=> root.size-value;
+                changed(v) => { root.apply-later("size", "\{v}"); }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSlider {
+                title: "Opacity";
+                description: "Overall opacity of the overlay window.";
+                minimum: 20;
+                maximum: 100;
+                step: 1;
+                suffix: "%";
+                value <=> root.opacity-value;
+                changed(v) => { root.apply-later("opacity", "\{v}"); }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSwitch {
+                title: "Lock position";
+                description: "Prevent accidental dragging. The overlay stays where it is.";
+                checked <=> root.locked;
+                toggled(v) => {
+                    root.locked = v;
+                    root.apply-now("locked", v ? "true" : "false");
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSwitch {
+                title: "Always on top";
+                description: "Keep the indicator above normal windows.";
+                checked <=> root.always-on-top;
+                toggled(v) => {
+                    root.always-on-top = v;
+                    root.apply-now("always_on_top", v ? "true" : "false");
+                }
+            }
+        }
+
+        Card {
+            title: "Tray menu";
+            subtitle: "Choose how the menu looks when you right-click the OnAir tray icon.";
+
+            RowSegmented {
+                title: "Menu style";
+                description: "Glass is the custom acrylic menu; Native uses the standard Windows menu.";
+                options: ["Glass", "Native"];
+                current-index: root.menu-style == "native" ? 1 : 0;
+                changed(i) => {
+                    root.menu-style = i == 1 ? "native" : "glass";
+                    root.apply-now("menu_style", root.menu-style);
+                }
+            }
+        }
+
+        Card {
+            title: "Configuration";
+            subtitle: "Settings live next to onair.exe when that folder is writable, otherwise in %APPDATA%\\onair.";
+
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "config.ini";
+                    description: "Line-based file. Comments, unknown keys and ordering are preserved.";
+                }
+                Button {
+                    text: "Open file";
+                    kind: "secondary";
+                    clicked => { root.open-config(); }
+                }
+                Button {
+                    text: "Open folder";
+                    kind: "ghost";
+                    clicked => { root.open-folder(); }
+                }
+            }
+
+            Rectangle {
+                height: 34px;
+                border-radius: Theme.radius-sm;
+                background: Theme.input-bg;
+                border-width: 1px;
+                border-color: Theme.border;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: 100%;
+                    text: root.config-path;
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            Text {
+                text: "OnAir \{root.version}";
+                color: Theme.text-muted;
+                font-size: Theme.font-caption;
+            }
+        }
+
+        Text {
+            text: "Settings never installs keyboard hooks. Hotkey capture is performed by the overlay.";
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            horizontal-alignment: center;
+        }
+    }
+}

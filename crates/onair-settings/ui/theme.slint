@@ -1,0 +1,58 @@
+// Central design tokens for the settings window. Solid colours only: no
+// acrylic, Mica, blur or shadows. Dark is the default; the Rust side flips
+// `dark` from the Windows AppsUseLightTheme preference at startup.
+
+export global Theme {
+    in-out property <bool> dark: true;
+    in property <string> font-family: "Segoe UI Variable";
+
+    out property <color> window-bg: dark ? #0F1115 : #F4F5F7;
+    out property <color> sidebar-bg: dark ? #14171C : #FFFFFF;
+    out property <color> surface: dark ? #181B21 : #FFFFFF;
+    out property <color> surface-raised: dark ? #1D2129 : #FFFFFF;
+    out property <color> surface-hover: dark ? #222731 : #EEF1F5;
+    out property <color> surface-pressed: dark ? #292F3A : #E4E8EE;
+    out property <color> input-bg: dark ? #1B1F26 : #FFFFFF;
+    out property <color> border: dark ? #2A303A : #DFE3E9;
+    out property <color> border-strong: dark ? #3A424F : #C9D0DA;
+    out property <color> text: dark ? #F2F5F9 : #161A20;
+    out property <color> text-secondary: dark ? #A7AFBC : #596170;
+    out property <color> text-muted: dark ? #737C8A : #8A93A1;
+    out property <color> accent: dark ? #2ECC71 : #1FA65A;
+    out property <color> accent-hover: dark ? #3BD97F : #17914E;
+    out property <color> accent-soft: dark ? #2ECC7126 : #1FA65A1A;
+    out property <color> accent-text: dark ? #07130B : #FFFFFF;
+    out property <color> focus-ring: dark ? #7BE3AA : #1FA65A;
+    out property <color> track: dark ? #2B313B : #E2E6EC;
+    out property <color> segment-bg: dark ? #14171C : #EEF1F5;
+    out property <color> segment-selected: dark ? #2A303A : #FFFFFF;
+    out property <color> nav-selected: dark ? #1E242D : #EDF3EF;
+    out property <color> danger: dark ? #F07064 : #C73A2E;
+    out property <color> danger-soft: dark ? #F070642A : #C73A2E1A;
+    out property <color> warning: dark ? #E8C67A : #8A5A00;
+    out property <color> warning-soft: dark ? #E8C67A26 : #8A5A001F;
+    out property <color> success: dark ? #6FE0A0 : #167A44;
+    out property <color> success-soft: dark ? #2ECC7120 : #1FA65A1A;
+    out property <color> preview-desk: dark ? #0B0D10 : #E9EDF2;
+    out property <color> preview-desk-grid: dark ? #171B21 : #DCE2E9;
+
+    out property <[string]> visual-options: ["Dot", "Ring", "Bar", "Mini"];
+    out property <[string]> visual-values: ["dot", "ring", "bar", "mini"];
+    out property <[string]> vm-buttons: ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "Mute"];
+    out property <[string]> strip-options: ["Strip 1", "Strip 2", "Strip 3", "Strip 4", "Strip 5", "Strip 6", "Strip 7", "Strip 8"];
+
+    // 4 px spacing grid.
+    out property <length> gap-xs: 4px;
+    out property <length> gap-sm: 8px;
+    out property <length> gap-md: 16px;
+    out property <length> gap-lg: 24px;
+    out property <length> radius-sm: 7px;
+    out property <length> radius-md: 10px;
+    out property <length> radius-lg: 14px;
+
+    out property <length> font-caption: 12px;
+    out property <length> font-body: 14px;
+    out property <length> font-row-title: 14px;
+    out property <length> font-card-title: 16px;
+    out property <length> font-page-title: 26px;
+}

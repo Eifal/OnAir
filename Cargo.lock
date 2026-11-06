@@ -2812,6 +2812,7 @@ name = "onair-settings"
 version = "0.3.0"
 dependencies = [
  "onair-config",
+ "raw-window-handle",
  "slint",
  "slint-build",
  "windows",
@@ -3638,6 +3639,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
