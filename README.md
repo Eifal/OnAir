@@ -22,21 +22,34 @@ layered windows are not composited over exclusive fullscreen), not a bug.
 
 ## Build
 
-Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`, Windows 10/11.
+Requirements: Rust 1.85+ (stable), target `x86_64-pc-windows-msvc`,
+Windows 10/11. The overlay keeps that MSRV; the settings window needs a
+newer toolchain (Slint requires Rust 1.92).
 
 ```powershell
-cargo build --release
-# exe: target\release\onair.exe  (~257 KB; 263,168 bytes)
+cargo build --release -p onair            # overlay   -> target\release\onair.exe
+cargo build --release -p onair-settings   # settings  -> target\release\onair-settings.exe
+# or build both:
+cargo build --release                     # the workspace default members
 ```
+
+Both binaries ship **next to each other**; the settings app is launched
+from the tray. The overlay never links Slint.
+
+Sizes: `onair.exe` **258,560 bytes** (~252 KB; the settings refactor
+actually shrank it below the original 263,168-byte release). The settings
+exe cannot be meaningfully smaller (~8 MB) because of the UI toolkit.
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
 `strip` for minimal size. Idle CPU < 0.1% (single `GetMessageW` loop +
-`SetTimer` polling, redraw only on change), working set ~15 MB.
+`SetTimer` polling, redraw only on change); working set ~15 MB for the
+overlay, ~33 MB for the settings window while it is open.
 
-The only runtime dependency is the `windows` crate; `winresource` is
-build-only and embeds the app icon/version metadata. Config parsing is
-hand-written `key=value`, Win32 API is used directly (no GUI framework),
-`#![windows_subsystem = "windows"]` so there is no console window.
+The only overlay runtime dependency is the `windows` crate; shared config
+logic lives in `onair-config` (plain Rust, no extra deps). `winresource`
+build-only embeds the app icon/version metadata. The UI toolkit of the
+settings window is Slint 1.18 with the winit backend and software
+renderer; the overlay itself uses no GUI framework.
 
 ## Run
 
@@ -46,43 +59,66 @@ Just run the exe. First run:
    if the exe folder is not writable; an existing legacy
    `%APPDATA%\vm-mic-indicator\config.ini` is kept for upgrades).
 2. Starts **unlocked** so you can drag it where you want.
-3. Right-click / left-click the tray icon → check **Lock position**.
+3. Left-click the tray icon to open **OnAir Settings**, or right-click
+   and choose it from the menu.
 
 Single instance is enforced with a named mutex (`Local\OnAirOverlay`).
+Settings is likewise single-instance (`Local\OnAirSettings`).
 
-## Tray menu (the only UI)
+## Tray menu
 
-Left and right click both open the menu:
+Right-click the tray icon. Left click (or double-click) opens
+**OnAir Settings** directly instead:
 
+- Settings... (launches `onair-settings.exe` next to `onair.exe`)
 - Lock position (checkmark)
 - Always on top (checkmark, re-asserted ~every 2 s)
-- Size: 24, 32, 48, 64, 96, 128 px
-- Opacity: 100 … 20 % (whole window)
-- Visual: Dot / Ring / Bar / Mini (see below)
-- Background: 100 / 90 / 70 / 50 / 30 / Transparent (bg square only)
-- Menu style: Glass (acrylic, default) / Native (Win32)
-- Action mode: Toggle (one button on/off) / Switch (two buttons A/B)
-- Voicemeeter source:
-  - Primary: Strip 1–8 (→ `Strip[n-1]`) + Button A1–A5, B1–B3, Mute
-  - Secondary: same choices, used by Switch mode
-  - Invert (checkmark, affects the primary display only)
-  - If `vm_param` or `vm_param_b` was hand-edited to something else, a
-    disabled `Custom: <param>` label is shown inside its submenu.
-- Open config file / Reload config / Quit
-- Action keybind (see below):
-  - `Toggle key: <name>` (current bind, informational)
-  - Set toggle key… / Clear toggle key
-  - Trigger mode: Toggle (press) / Hold (push-to-talk) / Both
-  - Hold tap threshold: 200 / 300 / 500 / 800 ms (Both mode only)
+- Quit
 
-Every change applies immediately, saves `config.ini`, and redraws if needed.
-Position is adopted on move and saved on drag end (`WM_EXITSIZEMOVE`) and exit.
+Everything else lives in the Settings window; the tray menu stays a
+quick stop, not a control panel. Changes made in Settings are written to
+`config.ini` and picked up by the running overlay through a registered
+window message (`OnAir.ReloadConfig`); edits made while OnAir is not
+running apply on the next launch. Both EXEs also keep working if the
+config file is hand-edited: Settings re-reads it immediately before
+every write, so values the overlay owns (`x`, `y`, `locked`), comments
+and unknown keys are never clobbered.
+
+## OnAir Settings (the control window)
+
+A separate executable (`onair-settings.exe`) with a full settings UI.
+Solid dark (default) or light theme following the Windows app theme;
+no Mica/acrylic/blur on the window surface itself. Native frame with a
+dark title bar and rounded corners (Windows 11; DWM attributes are
+best-effort elsewhere). Segoe UI Variable with Segoe UI fallback.
+Keyboard accessible; 100/125/150 % DPI clean.
+
+Pages:
+
+- **General** – size, opacity, lock position, always on top, tray menu
+  style (Glass acrylic / Native Win32).
+- **Appearance** – visual style (Dot/Ring/Bar/Mini), background opacity,
+  colours (on/off/unknown/background) with hex validation, and a live
+  on-screen preview with a pulse animation.
+- **Voicemeeter** – toggle vs two-button switch mode, primary/secondary
+  parameter with strip/button dropdowns or a raw "Custom" value, invert,
+  poll interval.
+- **Hotkey** – capture the global toggle key (the overlay installs the
+  low-level hook; Settings just asks it to and polls `config.ini`),
+  trigger mode and hold/tap threshold.
+- **About** – version, config file / folder open, privacy statement,
+  Slint attribution.
+
+All changes are debounced (~150 ms) for sliders/text and immediate for
+switches/segmented controls; a toast confirms writes. If the overlay is
+not running, a subtle banner says edits are saved for the next launch.
 
 ## Config (`config.ini`)
 
 `key=value`, one per line, `#` = comment, unknown keys ignored,
 invalid values fall back to defaults. Written atomically on actual changes
-and on exit.
+and on exit. The Settings window edits the same file with line-based
+rewrites, preserving comments, unknown keys and ordering.
 
 ```
 x=40
@@ -130,7 +166,7 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 - **Mini** — no background, just a small dot (~54% size)
   (minimal footprint; use 32–48 px, 80–100% opacity).
 
-Tray → **Visual** switches instantly and saves `config.ini`.
+Settings → **Appearance → Visual** switches immediately and saves `config.ini`.
 Tray icon always stays Dot for recognizability.
 
 ## Background transparency (`bg_opacity`)
@@ -143,7 +179,7 @@ Tray icon always stays Dot for recognizability.
   Hitbox/drag area stays `size`×`size` — only the paint changes,
   click-through when locked is unaffected.
 - No effect on **Mini** (already has no background).
-- Tray → **Background** or `config.ini` (`bg_opacity`, aliases
+- Settings → **Appearance → Background** or `config.ini` (`bg_opacity`, aliases
   `bg_alpha`, `background_opacity`).
 
 ## Tray menu style
@@ -155,12 +191,12 @@ Tray icon always stays Dot for recognizability.
 - `menu_style=native` keeps the exact Win32 system menu, which is also the
   accessibility fallback. The glass menu falls back to it automatically if
   its windows cannot be created.
-- Tray → **Menu style** or `config.ini`; the change applies the next time the
+- Settings → **General → Tray menu** or `config.ini`; the change applies the next time the
   menu opens.
 
 ## Action modes
 
-Tray → **Action mode** chooses what the keybind does:
+Settings → **Voicemeeter → Switch mode** chooses what the keybind does:
 
 - **Toggle (one button on/off)** — the existing behavior: each press flips
   `vm_param` between ON and OFF. This is the default.
@@ -213,7 +249,7 @@ Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
 ## Action keybind / hold
 
 The overlay can drive the configured Voicemeeter button(s) itself, so
-Voicemeeter's own macro button is optional. Tray → **Trigger mode**:
+Voicemeeter's own macro button is optional. Settings → **Hotkey → Trigger behaviour**:
 
 - **Toggle (press)** — key/button down flips the parameter permanently
   (or swaps the A/B pair in switch mode).
@@ -227,10 +263,10 @@ Voicemeeter's own macro button is optional. Tray → **Trigger mode**:
 
 Details:
 
-- Tray → **Set toggle key…** → press a keyboard key or mouse button
+- Settings → **Hotkey → Capture key** → press a keyboard key or mouse button
   anywhere (Left/Right/Middle/X1/X2 side buttons). Modifier-only presses
   (Shift/Ctrl/Alt/Win) are ignored, so Ctrl+A binds A. Esc cancels, the
-  capture also times out after 15 s, and opening the tray menu cancels it.
+  capture also times out after 15 s, and Esc or any tray click cancels it.
 - The event is always **passed through**: the key keeps working normally in
   games/apps AND drives the mic.
 - Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
@@ -242,8 +278,9 @@ Details:
   unknown, presses are ignored. If you change a parameter manually
   mid-hold, the release restores the saved state and overwrites that
   manual change (expected for simple PTT / momentary switch).
-- `hold_tap_ms` (Both only) is configurable via tray
-  (200/300/500/800 ms) or freely in `config.ini` (100–2000, default 300).
+- `hold_tap_ms` (Both only) is configurable via **Settings → Hotkey →
+  Hold/tap threshold** (slider + manual value) or in `config.ini`
+  (100–2000, default 300).
 - Coverage is whatever Windows low-level hooks see: keyboard incl. F13–F24,
   plus Mouse Left/Right/Middle/X1/X2. Extra vendor-only gaming buttons are
   invisible to Windows itself and cannot be bound.
@@ -257,7 +294,8 @@ Details:
 - Separate top-most window only, plus low-level input hooks for the optional
   toggle keybind. No hooks into the game, no DLL injection,
   no game-memory reading.
-- No sound, no clickable overlay, no settings window/dialogs, no separate
+- No sound, no clickable overlay, no settings UI inside the overlay itself
+  (a separate `onair-settings.exe` ships alongside it), no separate
   hotkey driver or background service, no autostart, no auto-update, no
   telemetry, no log files. The optional keybind is handled in-process.
 - Windows 10/11 64-bit only.
@@ -265,18 +303,26 @@ Details:
 ## Layout
 
 ```
-Cargo.toml
+Cargo.toml         // workspace: root package onair + crates/onair-*
 build.rs       // embeds assets/onair.ico + version metadata
 assets/
   onair.ico
 LICENSE
 src/
-  main.rs      // entry, single instance, message loop, timers, WndProc
+  main.rs      // entry, single instance, message loop, timers, WndProc, tray IPC
   window.rs    // helpers: lock / topmost / pos / clamp / drag via HTCAPTION
   render.rs    // DIB + SDF rasterizer + UpdateLayeredWindow + tray icon
   vm.rs        // dynamic DLL loading, login, polling, MicState
-  tray.rs      // Shell_NotifyIcon, shared menu model, native menu, tooltip
+  tray.rs      // Shell_NotifyIcon, minimal menu model, native menu, tooltip
   glassmenu.rs // custom acrylic tray menu (rendered from tray::build_model)
-  config.rs    // load / save / defaults / clamping
+  config.rs    // re-exports onair-config (load / save / defaults / clamps)
   hotkey.rs    // WH_KEYBOARD_LL + WH_MOUSE_LL mic toggle bind + capture
+crates/
+  onair-config/ // shared config parsing / clamps / atomic update / settings-write
+  onair-settings/ // Slint settings window (native frame, DWM title bar,
+                 //  light/dark theme, debounced writes, live reload banner)
 ```
+
+IPC (registered window messages): `OnAir.ReloadConfig` (settings → overlay,
+reload config), `OnAir.BeginCapture` (settings → overlay, start key capture);
+the overlay window class is `OnAirOverlay`.

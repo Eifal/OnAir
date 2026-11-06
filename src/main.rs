@@ -659,15 +659,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             let mouse = (lparam.0 as u32) & 0xFFFF;
-            // Legacy: 514 WM_LBUTTONUP, 517 WM_RBUTTONUP.
-            // NOTIFYICON_VERSION_4: 123 WM_CONTEXTMENU (right),
-            // 1024 NIN_SELECT (left). Handle both so the menu opens
-            // reliably on all Windows 10/11 builds.
-            if mouse == WM_LBUTTONUP || mouse == WM_RBUTTONUP || mouse == 123 || mouse == 1024 {
-                // Reentrancy guard: some systems deliver two notifications
-                // for one click; never stack two modal menus.
-                static mut IN_MENU: bool = false;
-                if !unsafe { IN_MENU } {
+            // Legacy: 514 WM_LBUTTONUP / 515 WM_LBUTTONDBLCLK / 517 WM_RBUTTONUP.
+            // NOTIFYICON_VERSION_4: 1024 NIN_SELECT (left),
+            // 123 WM_CONTEXTMENU (right). Handle both so left-click opens
+            // settings and right-click opens the menu reliably on all
+            // Windows 10/11 builds.
+            match mouse {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK | 1024 => {
+                    tray::open_settings();
+                }
+                WM_RBUTTONUP | 123 => {
+                    // Reentrancy guard: some systems deliver two notifications
+                    // for one click; never stack two modal menus.
+                    static mut IN_MENU: bool = false;
+                    if unsafe { IN_MENU } {
+                        return LRESULT(0);
+                    }
                     unsafe {
                         IN_MENU = true;
                     }
@@ -684,6 +691,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         handle_command(hwnd, id);
                     }
                 }
+                _ => {}
             }
             LRESULT(0)
         }
@@ -791,191 +799,8 @@ fn handle_command(hwnd: HWND, id: u32) {
         let _ = app_mut().cfg.save();
         return;
     }
-    if id == ID_INVERT {
-        // Release an active PTT before changing how the raw value is
-        // interpreted; otherwise key-up could write the saved state using
-        // the new invert flag.
-        restore_hold_if_held();
-        let v = !app_mut().cfg.invert;
-        app_mut().cfg.invert = v;
-        let _ = app_mut().cfg.save();
-        do_poll_and_update();
-        redraw_locked();
-        refresh_tray();
-        return;
-    }
-    if id == ID_VM_MODE_TOGGLE || id == ID_VM_MODE_SWITCH {
-        // Never change the action mode while a momentary hold is active:
-        // key-up must restore against the mode it started in.
-        restore_hold_if_held();
-        app_mut().cfg.vm_mode = if id == ID_VM_MODE_SWITCH {
-            VmMode::Switch
-        } else {
-            VmMode::Toggle
-        };
-        let _ = app_mut().cfg.save();
-        refresh_tray();
-        return;
-    }
-    if id == ID_OPEN_CFG {
-        tray::open_config_file();
-        return;
-    }
-    if id == ID_RELOAD_CFG {
-        // Restore against the old parameter before replacing the config;
-        // after the swap we no longer know which parameter was held.
-        restore_hold_if_held();
-        let cfg = AppConfig::load();
-        app_mut().cfg = cfg;
-        apply_all_after_config_change();
-        return;
-    }
-    if id == ID_TOGGLE_SET {
-        // Don't let a hold stick ON across re-binding.
-        restore_hold_if_held();
-        begin_capture();
-        return;
-    }
-    if id == ID_TOGGLE_CLEAR {
-        restore_hold_if_held();
-        hotkey::set_capturing(false);
-        app_mut().capture_until = None;
-        app_mut().cfg.toggle_key = ToggleKey::None;
-        hotkey::set_bind(ToggleKey::None);
-        let _ = app_mut().cfg.save();
-        refresh_tray();
-        return;
-    }
-    if id == ID_TRIGGER_TOGGLE || id == ID_TRIGGER_HOLD || id == ID_TRIGGER_BOTH {
-        restore_hold_if_held();
-        app_mut().cfg.trigger_mode = match id {
-            ID_TRIGGER_HOLD => TriggerMode::Hold,
-            ID_TRIGGER_BOTH => TriggerMode::Both,
-            _ => TriggerMode::Toggle,
-        };
-        let _ = app_mut().cfg.save();
-        refresh_tray();
-        return;
-    }
-    if (ID_HOLDMS_BASE..ID_HOLDMS_BASE + 4).contains(&id) {
-        let idx = (id - ID_HOLDMS_BASE) as usize;
-        if let Some(&ms) = HOLD_TAPS.get(idx) {
-            app_mut().cfg.hold_tap_ms = ms;
-            let _ = app_mut().cfg.save();
-            refresh_tray();
-        }
-        return;
-    }
-    if (ID_SIZE_BASE..ID_SIZE_BASE + 6).contains(&id) {
-        let idx = (id - ID_SIZE_BASE) as usize;
-        if let Some(&s) = SIZES.get(idx) {
-            app_mut().cfg.size = s;
-            // Keep position; only nudge minimally to stay on-screen.
-            // (Never reset to (40,40) here — that teleport was the bug.)
-            let (x, y) = {
-                let a = app_mut();
-                (a.cfg.x, a.cfg.y)
-            };
-            let (cx, cy) = nudge_into_view(x, y, s);
-            app_mut().cfg.x = cx;
-            app_mut().cfg.y = cy;
-            apply_pos(hwnd, cx, cy, s);
-            redraw_locked();
-            let _ = app_mut().cfg.save();
-        }
-        return;
-    }
-    if (ID_OPACITY_BASE..ID_OPACITY_BASE + 9).contains(&id) {
-        let idx = (id - ID_OPACITY_BASE) as usize;
-        if let Some(&o) = OPACITIES.get(idx) {
-            app_mut().cfg.opacity = o;
-            redraw_locked();
-            let _ = app_mut().cfg.save();
-        }
-        return;
-    }
-    if (ID_VISUAL_BASE..ID_VISUAL_BASE + 4).contains(&id) {
-        let idx = (id - ID_VISUAL_BASE) as usize;
-        if let Some(&(style, _)) = VISUALS.get(idx) {
-            app_mut().cfg.visual_style = style;
-            redraw_locked();
-            let _ = app_mut().cfg.save();
-            refresh_tray();
-        }
-        return;
-    }
-    if (ID_BG_BASE..ID_BG_BASE + 6).contains(&id) {
-        let idx = (id - ID_BG_BASE) as usize;
-        if let Some(&o) = BG_OPACITIES.get(idx) {
-            app_mut().cfg.bg_opacity = o;
-            redraw_locked();
-            let _ = app_mut().cfg.save();
-        }
-        return;
-    }
-    if id == ID_MENU_STYLE_GLASS || id == ID_MENU_STYLE_NATIVE {
-        app_mut().cfg.menu_style = if id == ID_MENU_STYLE_NATIVE {
-            MenuStyle::Native
-        } else {
-            MenuStyle::Glass
-        };
-        let _ = app_mut().cfg.save();
-        refresh_tray();
-        return;
-    }
-    if (ID_STRIP_BASE..ID_STRIP_BASE + 8).contains(&id) {
-        // Restore against the currently held parameter before switching
-        // to a different strip.
-        restore_hold_if_held();
-        let strip1 = id - ID_STRIP_BASE + 1; // 1-based
-        let btn = tray::parse_strip_button(&app_mut().cfg.vm_param)
-            .map(|(_, b)| b)
-            .unwrap_or_else(|| "B2".to_string());
-        app_mut().cfg.vm_param = format!("Strip[{}].{}", strip1 - 1, btn);
-        let _ = app_mut().cfg.save();
-        do_poll_and_update();
-        refresh_tray();
-        return;
-    }
-    if (ID_BTN_BASE..ID_BTN_BASE + 9).contains(&id) {
-        // Restore against the currently held button before switching.
-        restore_hold_if_held();
-        let idx = (id - ID_BTN_BASE) as usize;
-        if let Some(&b) = BUTTONS.get(idx) {
-            let strip0 = tray::parse_strip_button(&app_mut().cfg.vm_param)
-                .map(|(s, _)| s - 1)
-                .unwrap_or(0);
-            app_mut().cfg.vm_param = format!("Strip[{}].{}", strip0, b);
-            let _ = app_mut().cfg.save();
-            do_poll_and_update();
-            refresh_tray();
-        }
-        return;
-    }
-    if (ID_STRIP_B_BASE..ID_STRIP_B_BASE + 8).contains(&id) {
-        // Secondary button (switch mode only): same strip/button editing
-        // as the primary parameter, but no overlay poll is needed.
-        restore_hold_if_held();
-        let strip1 = id - ID_STRIP_B_BASE + 1; // 1-based
-        let btn = tray::parse_strip_button(&app_mut().cfg.vm_param_b)
-            .map(|(_, b)| b)
-            .unwrap_or_else(|| "B1".to_string());
-        app_mut().cfg.vm_param_b = format!("Strip[{}].{}", strip1 - 1, btn);
-        let _ = app_mut().cfg.save();
-        refresh_tray();
-        return;
-    }
-    if (ID_BTN_B_BASE..ID_BTN_B_BASE + 9).contains(&id) {
-        restore_hold_if_held();
-        let idx = (id - ID_BTN_B_BASE) as usize;
-        if let Some(&b) = BUTTONS.get(idx) {
-            let strip0 = tray::parse_strip_button(&app_mut().cfg.vm_param_b)
-                .map(|(s, _)| s - 1)
-                .unwrap_or(0);
-            app_mut().cfg.vm_param_b = format!("Strip[{}].{}", strip0, b);
-            let _ = app_mut().cfg.save();
-            refresh_tray();
-        }
+    if id == ID_SETTINGS {
+        tray::open_settings();
     }
 }
 
