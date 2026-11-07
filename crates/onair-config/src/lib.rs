@@ -1047,6 +1047,11 @@ fn split_line_ending(chunk: &str) -> (&str, &str) {
 /// atomically swap the file. Values the caller does not list (x/y/locked when
 /// the overlay owns them) are never touched.
 pub fn update_config_file(path: &Path, edits: &[(ConfigKey, String)]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     let _lock = ConfigLock::acquire(path)?;
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -1061,11 +1066,6 @@ pub fn update_config_file(path: &Path, edits: &[(ConfigKey, String)]) -> std::io
     out.push_str(bom);
     out.push_str(&apply_edits(body, edits));
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
     write_atomic(path, out.as_bytes())
 }
 
