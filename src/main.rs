@@ -17,7 +17,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use config::{AppConfig, MenuStyle, MouseBtn, ToggleKey, TriggerMode, VmMode};
+use config::{AppConfig, ConfigKey, MenuStyle, MouseBtn, ToggleKey, TriggerMode, VmMode};
 use vm::{MicState, VmClient};
 use window::{
     apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect,
@@ -25,6 +25,16 @@ use window::{
 
 /// Keybind capture window: Esc cancels, opening the tray menu cancels.
 const CAPTURE_TIMEOUT_MS: u64 = 15_000;
+
+/// Values the overlay owns. It must never rewrite the whole config: comments,
+/// unknown keys and settings-owned values belong to onair-settings.
+const POSITION_KEYS: &[ConfigKey] = &[ConfigKey::X, ConfigKey::Y];
+const OVERLAY_KEYS: &[ConfigKey] = &[
+    ConfigKey::X,
+    ConfigKey::Y,
+    ConfigKey::Locked,
+    ConfigKey::AlwaysOnTop,
+];
 
 struct AppState {
     cfg: AppConfig,
@@ -445,8 +455,8 @@ fn apply_all_after_config_change() {
     do_poll_and_update();
     redraw_locked();
     refresh_tray();
-    // Deliberately no full-file save here: onair-settings preserves comments
-    // and unknown keys, and rewriting the file on reload would discard them.
+    // Deliberately no write on reload: onair-settings preserves comments and
+    // unknown keys, and the overlay only owns position/lock/topmost/hotkey.
     // Geometry nudges are persisted by the next drag/command/exit save.
 }
 
@@ -571,7 +581,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     a.cfg.y = y;
                     a.cfg.clone()
                 };
-                let _ = save.save();
+                let _ = save.save_keys(POSITION_KEYS);
             }
             LRESULT(0)
         }
@@ -596,7 +606,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             };
             apply_pos(hwnd, x, y, size);
             redraw_locked();
-            let _ = app_mut().cfg.save();
+            let _ = app_mut().cfg.save_keys(POSITION_KEYS);
             LRESULT(0)
         }
         WM_DISPLAYCHANGE => {
@@ -616,7 +626,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     a.cfg.y = cy;
                 }
                 apply_pos(hwnd, cx, cy, size);
-                let _ = app_mut().cfg.save();
+                let _ = app_mut().cfg.save_keys(POSITION_KEYS);
             }
             LRESULT(0)
         }
@@ -722,7 +732,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if !key.is_none() {
                     app_mut().cfg.toggle_key = key;
                     hotkey::set_bind(key);
-                    let _ = app_mut().cfg.save();
+                    let _ = app_mut().cfg.save_keys(&[ConfigKey::ToggleKey]);
                 }
                 refresh_tray();
             }
@@ -778,7 +788,7 @@ fn handle_command(hwnd: HWND, id: u32) {
         // Release a held PTT before destroying the window. Otherwise the
         // mic can stay ON after the app exits.
         restore_hold_if_held();
-        let _ = app_mut().cfg.save();
+        let _ = app_mut().cfg.save_keys(OVERLAY_KEYS);
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
@@ -789,14 +799,14 @@ fn handle_command(hwnd: HWND, id: u32) {
         app_mut().cfg.locked = v;
         apply_lock(hwnd, v);
         redraw_locked();
-        let _ = app_mut().cfg.save();
+        let _ = app_mut().cfg.save_keys(&[ConfigKey::Locked]);
         return;
     }
     if id == ID_TOPMOST {
         let v = !app_mut().cfg.always_on_top;
         app_mut().cfg.always_on_top = v;
         apply_topmost(hwnd, v);
-        let _ = app_mut().cfg.save();
+        let _ = app_mut().cfg.save_keys(&[ConfigKey::AlwaysOnTop]);
         return;
     }
     if id == ID_SETTINGS {
@@ -959,7 +969,7 @@ fn main() {
                 a.cfg.x = x;
                 a.cfg.y = y;
             }
-            let _ = a.cfg.save();
+            let _ = a.cfg.save_keys(OVERLAY_KEYS);
         }
     }
 }
