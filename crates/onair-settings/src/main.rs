@@ -38,6 +38,9 @@ struct Pending {
     edits: HashMap<ConfigKey, String>,
     capture_started: Option<Instant>,
     capture_baseline: ToggleKey,
+    capture_mtime: Option<std::time::SystemTime>,
+    capture_writes: u64,
+    local_writes: u64,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -83,6 +86,18 @@ fn slint_color(rgb: (u8, u8, u8)) -> slint::Color {
 fn show_toast(ui: &AppWindow, message: impl Into<SharedString>, error: bool) {
     ui.set_toast_text(message.into());
     ui.set_toast_error(error);
+}
+
+/// Read the capture-relevant state straight from disk. `None` means the file
+/// could not be read, so a transient error must never look like a capture.
+fn read_capture_state() -> Option<(ToggleKey, Option<std::time::SystemTime>)> {
+    let path = AppConfig::config_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let key = AppConfig::parse(&text).toggle_key;
+    let mtime = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    Some((key, mtime))
 }
 
 fn vm_fields(param: &str, fallback_button: &str) -> (i32, SharedString, bool) {
@@ -323,13 +338,22 @@ fn normalize_color(ui: &AppWindow, value: &str, field: ColorField) -> Result<Str
     Ok(color_hex(rgb))
 }
 
-fn write_edits(ui: &AppWindow, edits: &[(ConfigKey, String)], announce: bool) {
+fn write_edits(
+    ui: &AppWindow,
+    pending: &Rc<RefCell<Pending>>,
+    edits: &[(ConfigKey, String)],
+    announce: bool,
+) {
     if edits.is_empty() {
         return;
     }
     let path = AppConfig::config_path();
     match update_config_file(&path, edits) {
         Ok(()) => {
+            {
+                let mut state = pending.borrow_mut();
+                state.local_writes = state.local_writes.saturating_add(1);
+            }
             let running = ipc::notify_reload();
             ui.set_overlay_running(running);
             if announce {
@@ -370,7 +394,7 @@ fn flush_pending(ui: &AppWindow, pending: &Rc<RefCell<Pending>>) -> bool {
             Err(message) => show_toast(ui, message, true),
         }
     }
-    write_edits(ui, &edits, false);
+    write_edits(ui, pending, &edits, false);
     true
 }
 
@@ -400,7 +424,7 @@ fn apply_edit(
         let still_pending = !state.edits.is_empty();
         drop(state);
         ui.set_edit_pending(still_pending);
-        write_edits(ui, &[(key, canonical)], true);
+        write_edits(ui, pending, &[(key, canonical)], true);
     } else {
         // Defer validation to flush_pending: text fields are edited one
         // keystroke at a time and intermediate values are often incomplete.
@@ -419,6 +443,7 @@ fn finish_capture(
 ) {
     let mut state = pending.borrow_mut();
     state.capture_started = None;
+    state.capture_mtime = None;
     drop(state);
     ui.set_capture_active(false);
     ui.set_capture_message(message.into());
@@ -466,6 +491,9 @@ fn main() -> Result<(), slint::PlatformError> {
         edits: HashMap::new(),
         capture_started: None,
         capture_baseline: cfg.toggle_key,
+        capture_mtime: None,
+        capture_writes: 0,
+        local_writes: 0,
     }));
     let picker = Rc::new(RefCell::new(None::<picker::PickerState>));
 
@@ -651,8 +679,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_begin_capture(move || {
             let Some(ui) = weak.upgrade() else { return };
-            // The overlay writes the whole file when capture completes. Flush
-            // our queued comments-preserving edits first so they survive it.
+            // Flush queued edits first so their write cannot be mistaken for a
+            // completed capture, and so the baseline reflects what is on disk.
             flush_pending(&ui, &state);
             if !ipc::overlay_running() {
                 ui.set_overlay_running(false);
@@ -660,15 +688,20 @@ fn main() -> Result<(), slint::PlatformError> {
                 show_toast(&ui, "Start OnAir before capturing a key.", true);
                 return;
             }
+            // Read the baseline *before* asking the overlay to capture: a very
+            // fast capture must not land between the request and our read.
+            let (baseline, baseline_mtime) =
+                read_capture_state().unwrap_or_else(|| (AppConfig::load().toggle_key, None));
             if !ipc::notify_begin_capture() {
                 ui.set_capture_message("Could not ask OnAir to capture a key.".into());
                 show_toast(&ui, "Could not start capture.", true);
                 return;
             }
-            let baseline = AppConfig::load().toggle_key;
             let mut state = state.borrow_mut();
             state.capture_started = Some(Instant::now());
             state.capture_baseline = baseline;
+            state.capture_mtime = baseline_mtime;
+            state.capture_writes = state.local_writes;
             drop(state);
             ui.set_capture_active(true);
             ui.set_capture_message("".into());
@@ -682,17 +715,18 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_clear_key(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            state.capture_started = None;
-            state.edits.remove(&ConfigKey::ToggleKey);
-            drop(state);
+            let mut guard = state.borrow_mut();
+            guard.capture_started = None;
+            guard.capture_mtime = None;
+            guard.edits.remove(&ConfigKey::ToggleKey);
+            drop(guard);
             ui.set_capture_active(false);
             ui.set_capture_message("Hotkey cleared.".into());
             // write_edits does not refresh UI properties; update the
             // visible bind here so the "Current bind" readout clears too.
             ui.set_toggle_key("None".into());
             ui.set_toggle_key_set(false);
-            write_edits(&ui, &[(ConfigKey::ToggleKey, "None".into())], true);
+            write_edits(&ui, &state, &[(ConfigKey::ToggleKey, "None".into())], true);
         });
     }
 
@@ -704,12 +738,15 @@ fn main() -> Result<(), slint::PlatformError> {
             let running = ipc::overlay_running();
             ui.set_overlay_running(running);
 
-            let (active, started, baseline) = {
+            let (active, started, baseline, baseline_mtime, baseline_writes, local_writes) = {
                 let state = state.borrow();
                 (
                     state.capture_started.is_some(),
                     state.capture_started.unwrap_or_else(Instant::now),
                     state.capture_baseline,
+                    state.capture_mtime,
+                    state.capture_writes,
+                    state.local_writes,
                 )
             };
             if !active {
@@ -725,14 +762,26 @@ fn main() -> Result<(), slint::PlatformError> {
                 finish_capture(&ui, &state, "Capture timed out. Try again.", true);
                 return;
             }
-            let cfg = AppConfig::load();
-            if cfg.toggle_key != baseline {
-                let name = toggle_key_name(cfg.toggle_key);
+            // The overlay persists the new bind on capture. Detect completion
+            // by value *or* file mtime: pressing the same bind again rewrites
+            // the file without changing the value.
+            let Some((captured, captured_mtime)) = read_capture_state() else {
+                return;
+            };
+            let value_changed = captured != baseline;
+            // Ignore mtime changes caused by this window's own slider/segmented
+            // edits while the capture is running.
+            let file_changed = baseline_mtime.is_some()
+                && local_writes == baseline_writes
+                && captured_mtime != baseline_mtime;
+            if value_changed || file_changed {
+                let name = toggle_key_name(captured);
                 ui.set_toggle_key(name.clone().into());
-                ui.set_toggle_key_set(!cfg.toggle_key.is_none());
+                ui.set_toggle_key_set(!captured.is_none());
                 {
                     let mut state = state.borrow_mut();
                     state.capture_started = None;
+                    state.capture_mtime = None;
                 }
                 ui.set_capture_active(false);
                 ui.set_capture_message(format!("Captured: {name}").into());
