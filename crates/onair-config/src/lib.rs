@@ -647,9 +647,13 @@ impl AppConfig {
     /// values it owns (position, lock, topmost, captured hotkey) so it can
     /// never clobber settings edited by `onair-settings`.
     pub fn save_keys(&self, keys: &[ConfigKey]) -> std::io::Result<()> {
+        self.save_keys_to(&Self::config_path(), keys)
+    }
+
+    fn save_keys_to(&self, path: &Path, keys: &[ConfigKey]) -> std::io::Result<()> {
         let edits: Vec<(ConfigKey, String)> =
             keys.iter().map(|&key| (key, self.value_for(key))).collect();
-        update_config_file(&Self::config_path(), &edits)
+        update_config_file(path, &edits)
     }
 
     fn value_for(&self, key: ConfigKey) -> String {
@@ -1382,6 +1386,35 @@ mod tests {
         }
         // A second acquire must succeed once the first lock is dropped.
         let _lock = ConfigLock::acquire(&path).unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn save_keys_preserves_untouched_lines() {
+        let path = temp_config_path("save-keys");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# keep me\nx=1\ny=2\ncolor_on=000000\nunknown=keep\n",
+        )
+        .unwrap();
+
+        let cfg = AppConfig {
+            x: 10,
+            y: 20,
+            ..AppConfig::default()
+        };
+        cfg.save_keys_to(&path, &[ConfigKey::X, ConfigKey::Y])
+            .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep me"));
+        assert!(text.contains("unknown=keep"));
+        assert!(text.contains("x=10"));
+        assert!(text.contains("y=20"));
+        // Settings-owned values must survive an overlay save untouched.
+        assert!(text.contains("color_on=000000"));
+
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
