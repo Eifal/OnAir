@@ -450,14 +450,26 @@ impl AppConfig {
     }
 
     pub fn load() -> Self {
-        let path = Self::config_path();
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&Self::config_path())
+    }
+
+    /// Load from an explicit path. Only a genuinely missing file counts as a
+    /// first run; any other read error (sharing violation, permissions, invalid
+    /// data) returns defaults *without writing*, so a transient failure can
+    /// never delete the user's config.
+    fn load_from(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text),
-            Err(_) => {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 // First run: create defaults
                 let mut cfg = Self::default();
                 cfg.clamp();
-                let _ = cfg.save();
+                let _ = cfg.write_full(path);
+                cfg
+            }
+            Err(_) => {
+                let mut cfg = Self::default();
+                cfg.clamp();
                 cfg
             }
         }
@@ -561,12 +573,19 @@ impl AppConfig {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let path = Self::config_path();
+        self.write_full(&Self::config_path())
+    }
+
+    /// Full rewrite used only when creating a config from defaults. Every other
+    /// write must go through `save_keys`/`update_config_file` so comments and
+    /// unknown keys survive.
+    fn write_full(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent)?;
             }
         }
+        let _lock = ConfigLock::acquire(path)?;
         let content = format!(
             "# OnAir config (key=value)\n\
              x={}\n\
@@ -620,7 +639,104 @@ impl AppConfig {
             self.color_bg.1,
             self.color_bg.2,
         );
-        write_atomic(&path, content.as_bytes())
+        write_atomic(path, content.as_bytes())
+    }
+
+    /// Persist only `keys`, leaving every other line (comments, unknown keys,
+    /// ordering and legacy aliases) untouched. The overlay uses this for the
+    /// values it owns (position, lock, topmost, captured hotkey) so it can
+    /// never clobber settings edited by `onair-settings`.
+    pub fn save_keys(&self, keys: &[ConfigKey]) -> std::io::Result<()> {
+        let edits: Vec<(ConfigKey, String)> =
+            keys.iter().map(|&key| (key, self.value_for(key))).collect();
+        update_config_file(&Self::config_path(), &edits)
+    }
+
+    fn value_for(&self, key: ConfigKey) -> String {
+        match key {
+            ConfigKey::X => self.x.to_string(),
+            ConfigKey::Y => self.y.to_string(),
+            ConfigKey::Size => self.size.to_string(),
+            ConfigKey::Opacity => self.opacity.to_string(),
+            ConfigKey::Locked => self.locked.to_string(),
+            ConfigKey::AlwaysOnTop => self.always_on_top.to_string(),
+            ConfigKey::VmMode => self.vm_mode.as_str().to_string(),
+            ConfigKey::VmParam => self.vm_param.clone(),
+            ConfigKey::VmParamB => self.vm_param_b.clone(),
+            ConfigKey::Invert => self.invert.to_string(),
+            ConfigKey::PollMs => self.poll_ms.to_string(),
+            ConfigKey::ToggleKey => toggle_key_name(self.toggle_key),
+            ConfigKey::TriggerMode => self.trigger_mode.as_str().to_string(),
+            ConfigKey::HoldTapMs => self.hold_tap_ms.to_string(),
+            ConfigKey::VisualStyle => self.visual_style.as_str().to_string(),
+            ConfigKey::BgOpacity => self.bg_opacity.to_string(),
+            ConfigKey::MenuStyle => self.menu_style.as_str().to_string(),
+            ConfigKey::ColorOn => color_hex(self.color_on),
+            ConfigKey::ColorOff => color_hex(self.color_off),
+            ConfigKey::ColorUnknown => color_hex(self.color_unknown),
+            ConfigKey::ColorBg => color_hex(self.color_bg),
+        }
+    }
+}
+
+fn color_hex(rgb: (u8, u8, u8)) -> String {
+    format!("{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2)
+}
+
+/// Cross-process advisory lock around config read-modify-write. The overlay
+/// and onair-settings both take it, so their line-preserving updates are
+/// serialised instead of racing. The lock is a sibling file created with
+/// `create_new`; a crashed owner's lock goes stale after 15 s.
+struct ConfigLock {
+    path: PathBuf,
+}
+
+impl ConfigLock {
+    fn acquire(target: &Path) -> std::io::Result<Self> {
+        use std::time::{Duration, Instant};
+
+        const RETRY: Duration = Duration::from_millis(20);
+        const TIMEOUT: Duration = Duration::from_secs(3);
+        const STALE: Duration = Duration::from_secs(15);
+
+        let path = target.with_extension("ini.lock");
+        let start = Instant::now();
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let _ = write!(file, "{}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .map(|time| time.elapsed().map(|age| age > STALE).unwrap_or(false))
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if start.elapsed() >= TIMEOUT {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "config.ini is busy",
+                        ));
+                    }
+                    std::thread::sleep(RETRY);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -633,12 +749,36 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&tmp, path)
+        rename_with_retry(&tmp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// `rename` can fail transiently on Windows while an antivirus, indexer or
+/// editor briefly holds the destination open. Retry those cases; anything
+/// else is a real failure.
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt < 5 && is_transient_sharing_error(&err) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25 * attempt));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn is_transient_sharing_error(err: &std::io::Error) -> bool {
+    // ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32) and
+    // ERROR_LOCK_VIOLATION (33) are the transient Windows cases.
+    err.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(err.raw_os_error(), Some(5) | Some(32) | Some(33))
 }
 
 fn parse_bool(v: &str, fallback: bool) -> bool {
@@ -903,6 +1043,7 @@ fn split_line_ending(chunk: &str) -> (&str, &str) {
 /// atomically swap the file. Values the caller does not list (x/y/locked when
 /// the overlay owns them) are never touched.
 pub fn update_config_file(path: &Path, edits: &[(ConfigKey, String)]) -> std::io::Result<()> {
+    let _lock = ConfigLock::acquire(path)?;
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1191,6 +1332,57 @@ mod tests {
         assert!(!dir.join("config.ini.tmp").exists());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_config_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "onair-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("config.ini")
+    }
+
+    #[test]
+    fn load_missing_file_creates_defaults() {
+        let path = temp_config_path("load-missing");
+        let cfg = AppConfig::load_from(&path);
+        assert_eq!(cfg.size, AppConfig::default().size);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("size="));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_read_error_does_not_overwrite_config() {
+        let path = temp_config_path("load-read-error");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Invalid UTF-8 makes read_to_string fail with InvalidData, not NotFound.
+        let original = [0xFFu8, 0xFE, 0x00, 0x01];
+        std::fs::write(&path, original).unwrap();
+
+        let cfg = AppConfig::load_from(&path);
+        assert_eq!(cfg.size, AppConfig::default().size);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn config_lock_is_released_on_drop() {
+        let path = temp_config_path("lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            let _lock = ConfigLock::acquire(&path).unwrap();
+            assert!(path.with_extension("ini.lock").exists());
+        }
+        // A second acquire must succeed once the first lock is dropped.
+        let _lock = ConfigLock::acquire(&path).unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
