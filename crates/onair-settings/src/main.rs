@@ -645,6 +645,48 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let weak = ui.as_weak();
         let picker = picker.clone();
+        ui.on_picker_nudge_hue(move |degrees| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            picker::nudge_hue(value, degrees);
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_nudge_saturation(move |delta| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            picker::nudge_saturation(value, delta);
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
+        ui.on_picker_nudge_value(move |delta| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut borrowed = picker.borrow_mut();
+            let Some(value) = borrowed.as_mut() else {
+                return;
+            };
+            picker::nudge_value(value, delta);
+            picker::push_props(&ui, value);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let picker = picker.clone();
         ui.on_picker_cancel(move || {
             let Some(ui) = weak.upgrade() else { return };
             picker.borrow_mut().take();

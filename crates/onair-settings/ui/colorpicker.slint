@@ -5,6 +5,10 @@ import { Button } from "components.slint";
 // `picker-open` is true, covering the whole window with a dimmed
 // backdrop; clicking the backdrop or Cancel discards the change.
 // Rust owns the HSV state and feeds it back through these properties.
+//
+// Keyboard: Esc cancels, Left/Right rotate the hue, Up/Down change
+// saturation, PageUp/PageDown (or +/-) change brightness, and Tab is
+// trapped inside the dialog.
 
 global PickerTokens {
     in property <length> disc-size: 176px;
@@ -26,173 +30,248 @@ export component ColorPicker inherits Rectangle {
 
     callback disc-pointer(float, float);
     callback value-pointer(float);
+    callback nudge-hue(float);
+    callback nudge-saturation(float);
+    callback nudge-value(float);
     callback reset();
     callback cancel();
     callback use();
 
     background: #00000070;
 
-    backdrop := TouchArea {
-        width: 100%;
-        height: 100%;
-        clicked => { root.cancel(); }
+    // Cycle focus among the three dialog buttons. Used to keep Tab
+    // inside the modal instead of reaching the page behind it.
+    function cycle-focus(reverse: bool) {
+        if (reverse) {
+            if (use-button.has-focus) {
+                cancel-button.take-focus();
+            } else if (cancel-button.has-focus) {
+                reset-button.take-focus();
+            } else {
+                use-button.take-focus();
+            }
+        } else {
+            if (reset-button.has-focus) {
+                cancel-button.take-focus();
+            } else if (cancel-button.has-focus) {
+                use-button.take-focus();
+            } else {
+                reset-button.take-focus();
+            }
+        }
     }
 
-    dialog := Rectangle {
-        width: 344px;
-        height: 396px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        border-radius: Theme.radius-lg;
-        background: Theme.surface;
-        border-width: 1px;
-        border-color: Theme.border-strong;
+    picker-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-tab-navigation: false;
 
-        // Swallow stray clicks so the backdrop does not dismiss the
-        // dialog while the user is adjusting it.
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { }
+        // Take focus as soon as the overlay appears so Escape and the
+        // arrow keys work without clicking first.
+        init => {
+            self.focus();
         }
 
-        VerticalLayout {
-            x: 16px;
-            y: 16px;
-            width: parent.width - 32px;
-            height: parent.height - 32px;
-            spacing: 12px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                accept
+            } else if (event.text == Key.Tab) {
+                root.cycle-focus(event.modifiers.shift);
+                accept
+            } else if (event.text == Key.LeftArrow) {
+                root.nudge-hue(-5);
+                accept
+            } else if (event.text == Key.RightArrow) {
+                root.nudge-hue(5);
+                accept
+            } else if (event.text == Key.UpArrow) {
+                root.nudge-saturation(0.03);
+                accept
+            } else if (event.text == Key.DownArrow) {
+                root.nudge-saturation(-0.03);
+                accept
+            } else if (event.text == Key.PageUp || event.text == "+" || event.text == "=") {
+                root.nudge-value(0.05);
+                accept
+            } else if (event.text == Key.PageDown || event.text == "-" || event.text == "_") {
+                root.nudge-value(-0.05);
+                accept
+            } else {
+                reject
+            }
+        }
 
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: Theme.font-card-title;
-                font-weight: 600;
+        backdrop := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.cancel();
+            }
+        }
+
+        dialog := Rectangle {
+            width: 344px;
+            height: 396px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+
+            // Swallow stray clicks so the backdrop does not dismiss the
+            // dialog while the user is adjusting it.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { }
             }
 
-            Rectangle {
-                height: 54px;
-                border-radius: Theme.radius-md;
-                background: root.preview;
-                border-width: 1px;
-                border-color: Theme.border-strong;
+            VerticalLayout {
+                x: 16px;
+                y: 16px;
+                width: parent.width - 32px;
+                height: parent.height - 32px;
+                spacing: 12px;
 
                 Text {
-                    text: "#" + root.hex-label;
-                    color: root.preview-dark ? #FFFFFF : #101318;
-                    font-size: 17px;
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: Theme.font-card-title;
                     font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 16px;
-                alignment: center;
-                cross-axis-alignment: center;
-
-                disc := Rectangle {
-                    width: PickerTokens.disc-size;
-                    height: PickerTokens.disc-size;
-
-                    Image {
-                        source: root.disc-image;
-                        width: 100%;
-                        height: 100%;
-                    }
-
-                    halo := Rectangle {
-                        width: 22px;
-                        height: 22px;
-                        border-radius: 11px;
-                        border-width: 2.5px;
-                        border-color: #00000088;
-                        background: transparent;
-                        x: PickerTokens.disc-size / 2 + root.marker-x * PickerTokens.disc-radius - 11px;
-                        y: PickerTokens.disc-size / 2 + root.marker-y * PickerTokens.disc-radius - 11px;
-                    }
-
-                    ring := Rectangle {
-                        width: PickerTokens.ring-diameter;
-                        height: PickerTokens.ring-diameter;
-                        border-radius: PickerTokens.ring-diameter / 2;
-                        border-width: 2px;
-                        border-color: #FFFFFF;
-                        background: transparent;
-                        x: PickerTokens.disc-size / 2 + root.marker-x * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
-                        y: PickerTokens.disc-size / 2 + root.marker-y * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
-                    }
-
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        mouse-cursor: pointer;
-                        moved => {
-                            root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
-                        }
-                        pointer-event(e) => {
-                            if e.kind == PointerEventKind.down {
-                                root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
-                            }
-                        }
-                    }
                 }
 
-                value-strip := Rectangle {
-                    width: 26px;
-                    height: PickerTokens.disc-size;
-                    border-radius: 13px;
-                    background: @linear-gradient(180deg, root.value-top 0%, #000000 100%);
+                Rectangle {
+                    height: 54px;
+                    border-radius: Theme.radius-md;
+                    background: root.preview;
                     border-width: 1px;
                     border-color: Theme.border-strong;
 
-                    Rectangle {
-                        x: -4px;
-                        y: (1.0 - root.value) * parent.height - 1.75px;
-                        width: parent.width + 8px;
-                        height: 3.5px;
-                        border-radius: 1.75px;
-                        border-width: 1px;
-                        border-color: #00000088;
-                        background: #FFFFFF;
+                    Text {
+                        text: "#" + root.hex-label;
+                        color: root.preview-dark ? #FFFFFF : #101318;
+                        font-size: 17px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    cross-axis-alignment: center;
+
+                    disc := Rectangle {
+                        width: PickerTokens.disc-size;
+                        height: PickerTokens.disc-size;
+
+                        Image {
+                            source: root.disc-image;
+                            width: 100%;
+                            height: 100%;
+                        }
+
+                        halo := Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            border-width: 2.5px;
+                            border-color: #00000088;
+                            background: transparent;
+                            x: PickerTokens.disc-size / 2 + root.marker-x * PickerTokens.disc-radius - 11px;
+                            y: PickerTokens.disc-size / 2 + root.marker-y * PickerTokens.disc-radius - 11px;
+                        }
+
+                        ring := Rectangle {
+                            width: PickerTokens.ring-diameter;
+                            height: PickerTokens.ring-diameter;
+                            border-radius: PickerTokens.ring-diameter / 2;
+                            border-width: 2px;
+                            border-color: #FFFFFF;
+                            background: transparent;
+                            x: PickerTokens.disc-size / 2 + root.marker-x * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
+                            y: PickerTokens.disc-size / 2 + root.marker-y * PickerTokens.disc-radius - PickerTokens.ring-diameter / 2;
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            // Only drag, never hover: a passing cursor must
+                            // not change the colour.
+                            moved => {
+                                if (self.pressed) {
+                                    root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down {
+                                    root.disc-pointer(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                        }
                     }
 
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        mouse-cursor: pointer;
-                        moved => {
-                            root.value-pointer(self.mouse-y / 1px);
+                    value-strip := Rectangle {
+                        width: 26px;
+                        height: PickerTokens.disc-size;
+                        border-radius: 13px;
+                        background: @linear-gradient(180deg, root.value-top 0%, #000000 100%);
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+
+                        Rectangle {
+                            x: -4px;
+                            y: (1.0 - root.value) * parent.height - 1.75px;
+                            width: parent.width + 8px;
+                            height: 3.5px;
+                            border-radius: 1.75px;
+                            border-width: 1px;
+                            border-color: #00000088;
+                            background: #FFFFFF;
                         }
-                        pointer-event(e) => {
-                            if e.kind == PointerEventKind.down {
-                                root.value-pointer(self.mouse-y / 1px);
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            moved => {
+                                if (self.pressed) {
+                                    root.value-pointer(self.mouse-y / 1px);
+                                }
+                            }
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down {
+                                    root.value-pointer(self.mouse-y / 1px);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            Rectangle { vertical-stretch: 1; background: transparent; }
+                Rectangle { vertical-stretch: 1; background: transparent; }
 
-            HorizontalLayout {
-                spacing: 10px;
-                Button {
-                    text: "Reset";
-                    kind: "ghost";
-                    clicked => { root.reset(); }
-                }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-                Button {
-                    text: "Cancel";
-                    kind: "secondary";
-                    clicked => { root.cancel(); }
-                }
-                Button {
-                    text: "Use colour";
-                    kind: "primary";
-                    clicked => { root.use(); }
+                HorizontalLayout {
+                    spacing: 10px;
+                    reset-button := Button {
+                        text: "Reset";
+                        kind: "ghost";
+                        clicked => { root.reset(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    cancel-button := Button {
+                        text: "Cancel";
+                        kind: "secondary";
+                        clicked => { root.cancel(); }
+                    }
+                    use-button := Button {
+                        text: "Use colour";
+                        kind: "primary";
+                        clicked => { root.use(); }
+                    }
                 }
             }
         }

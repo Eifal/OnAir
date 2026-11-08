@@ -257,7 +257,12 @@ export component Button inherits Rectangle {
     in property <string> text;
     in property <string> kind: "secondary"; // primary | secondary | ghost | danger
     in property <bool> enabled: true;
+    out property <bool> has-focus: fs.has-focus;
     callback clicked;
+
+    public function take-focus() {
+        fs.focus();
+    }
 
     min-width: 84px;
     height: 34px;

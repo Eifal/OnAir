@@ -94,6 +94,9 @@ export component AppWindow inherits Window {
     callback open-picker(string);
     callback picker-disc-pointer(float, float);
     callback picker-value-pointer(float);
+    callback picker-nudge-hue(float);
+    callback picker-nudge-saturation(float);
+    callback picker-nudge-value(float);
     callback picker-reset();
     callback picker-cancel();
     callback picker-use();
@@ -512,6 +515,9 @@ export component AppWindow inherits Window {
         marker-y: root.picker-marker-y;
         disc-pointer(x, y) => { root.picker-disc-pointer(x, y); }
         value-pointer(y) => { root.picker-value-pointer(y); }
+        nudge-hue(degrees) => { root.picker-nudge-hue(degrees); }
+        nudge-saturation(delta) => { root.picker-nudge-saturation(delta); }
+        nudge-value(delta) => { root.picker-nudge-value(delta); }
         reset => { root.picker-reset(); }
         cancel => { root.picker-cancel(); }
         use => { root.picker-use(); }

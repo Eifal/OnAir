@@ -200,6 +200,21 @@ pub fn value_from_y(y: f32) -> f32 {
     1.0 - (y / VALUE_STRIP_PX).clamp(0.0, 1.0)
 }
 
+/// Rotate the hue, wrapping around the colour circle.
+pub fn nudge_hue(state: &mut PickerState, degrees: f32) {
+    state.h = (state.h + degrees).rem_euclid(360.0);
+}
+
+/// Move the marker towards or away from the centre of the disc.
+pub fn nudge_saturation(state: &mut PickerState, delta: f32) {
+    state.s = (state.s + delta).clamp(0.0, 1.0);
+}
+
+/// Move the brightness slider up or down.
+pub fn nudge_value(state: &mut PickerState, delta: f32) {
+    state.v = (state.v + delta).clamp(0.0, 1.0);
+}
+
 /// Render the hue/saturation disc once at startup.
 pub fn disc_image() -> slint::Image {
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(DISC_SIZE, DISC_SIZE);
@@ -224,4 +239,33 @@ pub fn disc_image() -> slint::Image {
         }
     }
     slint::Image::from_rgba8(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nudges_wrap_and_clamp() {
+        let mut state = PickerState {
+            field: ColorField::On,
+            h: 350.0,
+            s: 0.5,
+            v: 0.9,
+        };
+        nudge_hue(&mut state, 20.0);
+        assert_eq!(state.h, 10.0);
+        nudge_hue(&mut state, -20.0);
+        assert_eq!(state.h, 350.0);
+
+        nudge_saturation(&mut state, 1.0);
+        assert_eq!(state.s, 1.0);
+        nudge_saturation(&mut state, -2.0);
+        assert_eq!(state.s, 0.0);
+
+        nudge_value(&mut state, 0.5);
+        assert_eq!(state.v, 1.0);
+        nudge_value(&mut state, -2.0);
+        assert_eq!(state.v, 0.0);
+    }
 }
