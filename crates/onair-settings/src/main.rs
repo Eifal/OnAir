@@ -41,6 +41,7 @@ struct Pending {
     capture_mtime: Option<std::time::SystemTime>,
     capture_writes: u64,
     local_writes: u64,
+    synced_mtime: Option<std::time::SystemTime>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -98,6 +99,14 @@ fn read_capture_state() -> Option<(ToggleKey, Option<std::time::SystemTime>)> {
         .and_then(|meta| meta.modified())
         .ok();
     Some((key, mtime))
+}
+
+/// Modification time of the config file, used to notice writes made by the
+/// overlay or by hand while the settings window is open.
+fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(AppConfig::config_path())
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 fn vm_fields(param: &str, fallback_button: &str) -> (i32, SharedString, bool) {
@@ -219,6 +228,7 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
                 param.to_string()
             };
             let (strip, button, custom) = vm_fields(&canonical, "B2");
+            ui.set_vm_param(canonical.clone().into());
             ui.set_vm_strip(strip);
             ui.set_vm_button(button);
             ui.set_vm_param_custom(custom);
@@ -240,6 +250,7 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
                 param.to_string()
             };
             let (strip, button, custom) = vm_fields(&canonical, "B1");
+            ui.set_vm_param_b(canonical.clone().into());
             ui.set_vm_strip_b(strip);
             ui.set_vm_button_b(button);
             ui.set_vm_param_b_custom(custom);
@@ -353,6 +364,7 @@ fn write_edits(
             {
                 let mut state = pending.borrow_mut();
                 state.local_writes = state.local_writes.saturating_add(1);
+                state.synced_mtime = config_mtime();
             }
             let running = ipc::notify_reload();
             ui.set_overlay_running(running);
@@ -385,13 +397,14 @@ fn flush_pending(ui: &AppWindow, pending: &Rc<RefCell<Pending>>) -> bool {
     }
 
     // Text fields can contain half-typed values while the debounce timer is
-    // running. Validate once on flush so keystrokes do not spray error toasts,
-    // but still reject anything that is not valid config on its own.
+    // running. Validate once on flush, but drop invalid intermediates
+    // silently: the field already turns red via the invalid flag, and
+    // toasting on every 150 ms pause would spam the user. An explicit
+    // Enter/commit (apply-now) still reports the error.
     let mut edits = Vec::with_capacity(raw_edits.len());
     for (key, value) in raw_edits {
-        match normalize_edit(ui, key, &value) {
-            Ok(value) => edits.push((key, value)),
-            Err(message) => show_toast(ui, message, true),
+        if let Ok(value) = normalize_edit(ui, key, &value) {
+            edits.push((key, value));
         }
     }
     write_edits(ui, pending, &edits, false);
@@ -494,6 +507,7 @@ fn main() -> Result<(), slint::PlatformError> {
         capture_mtime: None,
         capture_writes: 0,
         local_writes: 0,
+        synced_mtime: config_mtime(),
     }));
     let picker = Rc::new(RefCell::new(None::<picker::PickerState>));
 
@@ -779,6 +793,28 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else { return };
             let running = ipc::overlay_running();
             ui.set_overlay_running(running);
+
+            // Adopt config changes made by the overlay (tray lock/topmost,
+            // dragged position) or by hand. Skip while capturing, while a
+            // debounced edit is pending, or while the colour picker owns the
+            // UI, so this never fights an in-progress interaction.
+            let sync = {
+                let state = state.borrow();
+                (
+                    state.capture_started.is_some(),
+                    state.synced_mtime,
+                    state.edits.is_empty(),
+                )
+            };
+            if !sync.0 && sync.2 && !ui.get_edit_pending() && !ui.get_picker_open() {
+                if let Some(mtime) = config_mtime() {
+                    if sync.1 != Some(mtime) {
+                        let cfg = AppConfig::load();
+                        push_config(&ui, &cfg);
+                        state.borrow_mut().synced_mtime = Some(mtime);
+                    }
+                }
+            }
 
             let (active, started, baseline, baseline_mtime, baseline_writes, local_writes) = {
                 let state = state.borrow();
