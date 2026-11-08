@@ -490,6 +490,12 @@ impl AppConfig {
             };
             let key = k.trim();
             let val = v.trim();
+            // Inline comments start at `#` or `;` only when preceded by
+            // whitespace, so a value like `#2ECC71` stays intact.
+            let val = match inline_comment_start(val) {
+                Some(index) => val[..index].trim(),
+                None => val,
+            };
             match key {
                 "x" => {
                     if let Ok(n) = val.parse::<i32>() {
@@ -785,6 +791,19 @@ fn is_transient_sharing_error(err: &std::io::Error) -> bool {
         || matches!(err.raw_os_error(), Some(5) | Some(32) | Some(33))
 }
 
+/// Byte offset of a trailing inline comment (`#` or `;` preceded by
+/// whitespace). Requiring whitespace keeps values such as `#2ECC71` intact.
+fn inline_comment_start(text: &str) -> Option<usize> {
+    let mut prev_ws = false;
+    for (index, ch) in text.char_indices() {
+        if (ch == '#' || ch == ';') && prev_ws {
+            return Some(index);
+        }
+        prev_ws = ch.is_whitespace();
+    }
+    None
+}
+
 fn parse_bool(v: &str, fallback: bool) -> bool {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => true,
@@ -1005,8 +1024,24 @@ pub fn apply_edits(text: &str, edits: &[(ConfigKey, String)]) -> String {
                 {
                     let after = &body[eq + 1..];
                     let leading_ws = after.len() - after.trim_start_matches([' ', '\t']).len();
+                    // Keep a trailing inline comment while replacing the value.
+                    // Start after the leading whitespace: `key = #141414` has a
+                    // value that begin with `#`, not a comment.
+                    let rest = &after[leading_ws..];
+                    let (value_part, comment) = match inline_comment_start(rest) {
+                        Some(index) => (
+                            &after[..leading_ws + index],
+                            Some(&after[leading_ws + index..]),
+                        ),
+                        None => (after, None),
+                    };
+                    let trailing_ws = &value_part[value_part.trim_end_matches([' ', '\t']).len()..];
                     result.push_str(&body[..eq + 1 + leading_ws]);
                     result.push_str(value);
+                    if let Some(comment) = comment {
+                        result.push_str(trailing_ws);
+                        result.push_str(comment);
+                    }
                     result.push_str(ending);
                     written[idx] = true;
                     replaced = true;
@@ -1315,6 +1350,28 @@ mod tests {
         assert_eq!(parse_hex6(""), None);
         // Six bytes but only two UTF-8 characters: must not panic.
         assert_eq!(parse_hex6("€€"), None);
+    }
+
+    #[test]
+    fn parse_supports_inline_comments() {
+        let cfg =
+            AppConfig::parse("size = 48 # pixels\ncolor_bg=#141414\ntoggle_key=None ; no bind\n");
+        assert_eq!(cfg.size, 48);
+        // A '#' that starts the value is not a comment.
+        assert_eq!(cfg.color_bg, (0x14, 0x14, 0x14));
+        assert!(cfg.toggle_key.is_none());
+    }
+
+    #[test]
+    fn update_preserves_inline_comments() {
+        let text = "size = 48 # pixels\ncolor_on = 2ECC71 ; green\n";
+        let out = apply_edits(text, &[(ConfigKey::Size, "64".into())]);
+        assert_eq!(out, "size = 64 # pixels\ncolor_on = 2ECC71 ; green\n");
+
+        // A value that starts with '#' is not an inline comment.
+        let text = "color_bg = #141414\n";
+        let out = apply_edits(text, &[(ConfigKey::ColorBg, "202020".into())]);
+        assert_eq!(out, "color_bg = 202020\n");
     }
 
     #[test]
