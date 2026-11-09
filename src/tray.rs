@@ -16,8 +16,8 @@ pub const ID_QUIT: u32 = 1502;
 const TRAY_UID: u32 = 1;
 
 /// Presentation-independent description of the tray menu. Both the native
-/// menu and the custom glass menu are built from this model, so checks,
-/// disabled states and ordering cannot drift apart.
+/// menu and the custom glass menu are built from this model, so checks and
+/// ordering cannot drift apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Action {
@@ -29,18 +29,7 @@ pub enum Item {
         label: String,
         checked: bool,
     },
-    // Kept for the shared glass/native menu renderer. The slim tray menu
-    // does not emit these, but the renderers handle a static model shape.
-    #[allow(dead_code)]
-    Disabled {
-        label: String,
-    },
     Separator,
-    #[allow(dead_code)]
-    Submenu {
-        label: String,
-        items: Vec<Item>,
-    },
 }
 
 impl Item {
@@ -219,22 +208,8 @@ fn append_items(hmenu: HMENU, items: &[Item]) {
                 };
                 append_text(hmenu, *id, label, flags);
             }
-            Item::Disabled { label } => {
-                append_text(hmenu, 0, label, MENU_ITEM_FLAGS(MF_STRING.0 | MF_GRAYED.0))
-            }
             Item::Separator => unsafe {
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-            },
-            Item::Submenu { label, items } => unsafe {
-                let hsub = CreatePopupMenu().unwrap_or_default();
-                if hsub.is_invalid() {
-                    continue;
-                }
-                append_items(hsub, items);
-                let w = to_wide(label);
-                if AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, PCWSTR(w.as_ptr())).is_err() {
-                    let _ = DestroyMenu(hsub);
-                }
             },
         }
     }

@@ -21,7 +21,7 @@ use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    VK_LEFT, VK_RETURN, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -32,8 +32,6 @@ use crate::window::to_wide;
 
 const GLASS_CLASS: &str = "OnAirGlassMenu";
 const CONTENT_CLASS: &str = "OnAirGlassContent";
-const HOVER_TIMER: usize = 1;
-const HOVER_MS: u32 = 250;
 
 // Sizes at 96 DPI.
 const ITEM_H96: i32 = 30;
@@ -41,16 +39,10 @@ const SEP_H96: i32 = 9;
 const PAD_X96: i32 = 12;
 const PAD_Y96: i32 = 5;
 const CHECK_W96: i32 = 24;
-const ARROW_W96: i32 = 24;
 const RADIUS96: i32 = 8;
 const MIN_W96: i32 = 190;
-/// Deepest cascade we allow (number of windows, root included):
-/// root -> Voicemeeter source -> Primary/Secondary -> Strip/Button.
-const MAX_MENU_DEPTH: u32 = 4;
 
 const TEXT: (u8, u8, u8) = (0xF5, 0xF5, 0xF5);
-const TEXT_DISABLED: (u8, u8, u8) = (0x8C, 0x8C, 0x96);
-const ARROW: (u8, u8, u8) = (0xC8, 0xC8, 0xD0);
 const HIGHLIGHT: (u8, u8, u8) = (0x00, 0x67, 0xC0);
 const FALLBACK_BG: (u8, u8, u8) = (0x2B, 0x2D, 0x33);
 // AABBGGRR: alpha 80%, RGB #2B2D33.
@@ -60,8 +52,6 @@ const ACCENT_COLOR: u32 = 0xCC33_2D2B;
 enum RowKind {
     Action,
     Check,
-    Submenu,
-    Disabled,
     Separator,
 }
 
@@ -77,7 +67,6 @@ struct Layout {
     dpi: u32,
     pad_x: i32,
     check_w: i32,
-    arrow_w: i32,
     radius: i32,
     rows: Vec<Row>,
     font: HFONT,
@@ -86,8 +75,6 @@ struct Layout {
 struct Menu {
     hwnd: HWND,
     content: HWND,
-    parent: Option<HWND>,
-    depth: u32,
     items: Vec<Item>,
     layout: Layout,
     view_height: i32,
@@ -95,15 +82,12 @@ struct Menu {
     hot: Option<usize>,
     pressed: Option<usize>,
     last_mouse: Option<(i32, i32)>,
-    open: Option<usize>,
-    child: Option<HWND>,
     accent: bool,
 }
 
 impl Drop for Menu {
     fn drop(&mut self) {
         unsafe {
-            let _ = KillTimer(Some(self.hwnd), HOVER_TIMER);
             if !self.content.is_invalid() {
                 let _ = DestroyWindow(self.content);
             }
@@ -124,7 +108,6 @@ struct Session {
     previous: HWND,
     done: bool,
     result: Option<u32>,
-    opening: bool,
 }
 
 static mut SESSION: Option<Session> = None;
@@ -258,24 +241,19 @@ fn item_kind(item: &Item) -> RowKind {
     match item {
         Item::Action { .. } => RowKind::Action,
         Item::Check { .. } => RowKind::Check,
-        Item::Submenu { .. } => RowKind::Submenu,
-        Item::Disabled { .. } => RowKind::Disabled,
         Item::Separator => RowKind::Separator,
     }
 }
 
 fn item_label(item: &Item) -> &str {
     match item {
-        Item::Action { label, .. }
-        | Item::Check { label, .. }
-        | Item::Disabled { label }
-        | Item::Submenu { label, .. } => label,
+        Item::Action { label, .. } | Item::Check { label, .. } => label,
         Item::Separator => "",
     }
 }
 
 fn is_enabled(kind: RowKind) -> bool {
-    !matches!(kind, RowKind::Disabled | RowKind::Separator)
+    kind != RowKind::Separator
 }
 
 fn measure_labels(items: &[Item], font: HFONT) -> i32 {
@@ -313,13 +291,11 @@ fn build_layout(items: &[Item], dpi: u32, font: HFONT) -> Layout {
     let pad_x = scale(PAD_X96, dpi);
     let pad_y = scale(PAD_Y96, dpi);
     let check_w = scale(CHECK_W96, dpi);
-    let arrow_w = scale(ARROW_W96, dpi);
     let radius = scale(RADIUS96, dpi);
     let item_h = scale(ITEM_H96, dpi);
     let sep_h = scale(SEP_H96, dpi).max(1);
     let max_label = measure_labels(items, font);
-    let width =
-        (pad_x * 2 + check_w + max_label + arrow_w + scale(4, dpi)).max(scale(MIN_W96, dpi));
+    let width = (pad_x * 2 + check_w + max_label + scale(4, dpi)).max(scale(MIN_W96, dpi));
 
     let mut rows = Vec::with_capacity(items.len());
     let mut y = pad_y;
@@ -350,7 +326,6 @@ fn build_layout(items: &[Item], dpi: u32, font: HFONT) -> Layout {
         dpi,
         pad_x,
         check_w,
-        arrow_w,
         radius,
         rows,
         font,
@@ -505,11 +480,7 @@ fn text_alpha(layout: &Layout, items: &[Item], scroll: i32, view_h: i32) -> Vec<
             if bottom <= 0 || top >= view_h {
                 continue;
             }
-            let right = if row.kind == RowKind::Submenu {
-                layout.width - layout.pad_x - layout.arrow_w
-            } else {
-                layout.width - layout.pad_x
-            };
+            let right = layout.width - layout.pad_x;
             let mut rect = RECT {
                 left: layout.pad_x + layout.check_w,
                 top,
@@ -578,8 +549,7 @@ fn render_content(menu: &Menu) -> Vec<u32> {
             continue;
         }
 
-        let highlighted =
-            (menu.hot == Some(row.item) || menu.open == Some(row.item)) && is_enabled(row.kind);
+        let highlighted = menu.hot == Some(row.item) && is_enabled(row.kind);
 
         if highlighted {
             let l = (6.0 * s).round();
@@ -635,46 +605,11 @@ fn render_content(menu: &Menu) -> Vec<u32> {
                 );
             }
         }
-        if row.kind == RowKind::Submenu {
-            let cx = (layout.width - layout.pad_x - layout.arrow_w / 2) as f32;
-            let half = (1.0 * s).max(0.75);
-            draw_segment(
-                &mut px,
-                w,
-                h,
-                cx - 2.0 * s,
-                cy - 4.0 * s,
-                cx + 2.0 * s,
-                cy,
-                half,
-                ARROW,
-            );
-            draw_segment(
-                &mut px,
-                w,
-                h,
-                cx + 2.0 * s,
-                cy,
-                cx - 2.0 * s,
-                cy + 4.0 * s,
-                half,
-                ARROW,
-            );
-        }
 
         // Composite the label coverage with the row's text colour.
-        let color = if row.kind == RowKind::Disabled {
-            TEXT_DISABLED
-        } else {
-            TEXT
-        };
+        let color = TEXT;
         let tx0 = (layout.pad_x + layout.check_w).max(0);
-        let tx1 = if row.kind == RowKind::Submenu {
-            layout.width - layout.pad_x - layout.arrow_w
-        } else {
-            layout.width - layout.pad_x
-        }
-        .min(layout.width);
+        let tx1 = (layout.width - layout.pad_x).min(layout.width);
         let y0 = top.max(0);
         let y1 = bottom.min(menu.view_height);
         for yy in y0..y1 {
@@ -695,7 +630,7 @@ fn render_content(menu: &Menu) -> Vec<u32> {
     }
 
     // Thin scroll indicator in the right padding when the menu is taller
-    // than the work area. It stays clear of the labels and submenu arrows.
+    // than the work area. It stays clear of the labels.
     let max_scroll = (layout.height - menu.view_height).max(0);
     if max_scroll > 0 {
         let track_w = (2.0 * s).round().max(1.0);
@@ -835,26 +770,6 @@ fn work_area_from_point(pt: POINT) -> RECT {
     }
 }
 
-fn work_area_from_window(hwnd: HWND) -> RECT {
-    unsafe {
-        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(mon, &mut mi).as_bool() {
-            mi.rcWork
-        } else {
-            RECT {
-                left: 0,
-                top: 0,
-                right: GetSystemMetrics(SM_CXSCREEN),
-                bottom: GetSystemMetrics(SM_CYSCREEN),
-            }
-        }
-    }
-}
-
 fn root_position(cursor: POINT, w: i32, h: i32) -> (i32, i32) {
     let work = work_area_from_point(cursor);
     let mut x = cursor.x;
@@ -888,37 +803,9 @@ fn root_position(cursor: POINT, w: i32, h: i32) -> (i32, i32) {
     (x, y)
 }
 
-fn submenu_position(parent: HWND, item_top: i32, w: i32, h: i32) -> (i32, i32) {
-    unsafe {
-        let mut pr = RECT::default();
-        let _ = GetWindowRect(parent, &mut pr);
-        let work = work_area_from_window(parent);
-        let mut x = pr.right - scale(2, 96);
-        if x + w > work.right {
-            x = pr.left - w + scale(2, 96);
-        }
-        if x + w > work.right {
-            x = work.right - w;
-        }
-        if x < work.left {
-            x = work.left;
-        }
-        let mut y = item_top;
-        if y + h > work.bottom {
-            y = work.bottom - h;
-        }
-        if y < work.top {
-            y = work.top;
-        }
-        (x, y)
-    }
-}
-
 unsafe fn create_menu(
     s: &mut Session,
     items: Vec<Item>,
-    parent: Option<HWND>,
-    depth: u32,
     anchor: POINT,
     max_h: i32,
 ) -> Option<HWND> {
@@ -928,13 +815,11 @@ unsafe fn create_menu(
     let hinstance = HINSTANCE(hmodule.0);
     let class = to_wide(GLASS_CLASS);
     let title = to_wide("OnAir menu");
-    let owner = parent.or_else(|| {
-        if s.host.is_invalid() {
-            None
-        } else {
-            Some(s.host)
-        }
-    });
+    let owner = if s.host.is_invalid() {
+        None
+    } else {
+        Some(s.host)
+    };
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         PCWSTR(class.as_ptr()),
@@ -952,9 +837,8 @@ unsafe fn create_menu(
     .ok()?;
 
     let dpi = {
-        // Submenus inherit the DPI of their parent menu; the root menu uses
-        // the monitor under the cursor, which is where it was just created.
-        let d = GetDpiForWindow(parent.unwrap_or(hwnd));
+        // The menu is created under the cursor, so its monitor defines DPI.
+        let d = GetDpiForWindow(hwnd);
         if d == 0 {
             96
         } else {
@@ -969,11 +853,7 @@ unsafe fn create_menu(
     let layout = build_layout(&items, dpi, font);
     let view_h = layout.height.min(max_h.max(scale(40, dpi)));
 
-    let (x, y) = if let Some(parent) = parent {
-        submenu_position(parent, anchor.y, layout.width, view_h)
-    } else {
-        root_position(anchor, layout.width, view_h)
-    };
+    let (x, y) = root_position(anchor, layout.width, view_h);
     let _ = SetWindowPos(
         hwnd,
         Some(HWND_TOPMOST),
@@ -1019,8 +899,6 @@ unsafe fn create_menu(
     let menu = Menu {
         hwnd,
         content,
-        parent,
-        depth,
         items,
         layout,
         view_height: view_h,
@@ -1028,8 +906,6 @@ unsafe fn create_menu(
         hot: None,
         pressed: None,
         last_mouse: None,
-        open: None,
-        child: None,
         accent: false,
     };
     s.windows.push(menu);
@@ -1100,7 +976,6 @@ fn close_session(s: &mut Session, result: Option<u32>) {
     s.result = result;
     for m in &s.windows {
         unsafe {
-            let _ = KillTimer(Some(m.hwnd), HOVER_TIMER);
             let _ = ShowWindow(m.content, SW_HIDE);
             let _ = ShowWindow(m.hwnd, SW_HIDE);
         }
@@ -1111,7 +986,6 @@ fn cleanup_session() -> Option<u32> {
     let mut s = unsafe { SESSION.take() }?;
     for m in &s.windows {
         unsafe {
-            let _ = KillTimer(Some(m.hwnd), HOVER_TIMER);
             let _ = ShowWindow(m.content, SW_HIDE);
             let _ = ShowWindow(m.hwnd, SW_HIDE);
         }
@@ -1129,51 +1003,6 @@ fn cleanup_session() -> Option<u32> {
         }
     }
     result
-}
-
-fn collect_tree(s: &Session, hwnd: HWND, out: &mut Vec<HWND>) {
-    out.push(hwnd);
-    if let Some(idx) = menu_index(s, hwnd) {
-        if let Some(child) = s.windows[idx].child {
-            collect_tree(s, child, out);
-        }
-    }
-}
-
-fn close_submenu(s: &mut Session, parent_idx: usize, keep_hot: bool) {
-    let child = s.windows[parent_idx].child.take();
-    let open = s.windows[parent_idx].open.take();
-    if keep_hot {
-        s.windows[parent_idx].hot = open;
-    }
-    if let Some(child) = child {
-        let mut tree = Vec::new();
-        collect_tree(s, child, &mut tree);
-        for h in tree.iter().rev() {
-            if let Some(idx) = menu_index(s, *h) {
-                unsafe {
-                    let _ = KillTimer(Some(s.windows[idx].hwnd), HOVER_TIMER);
-                }
-                s.windows.remove(idx);
-            }
-        }
-    }
-    unsafe {
-        let parent_hwnd = s.windows[parent_idx].hwnd;
-        refresh_content(&s.windows[parent_idx]);
-        let _ = SetForegroundWindow(parent_hwnd);
-        let _ = SetFocus(Some(parent_hwnd));
-    }
-}
-
-fn depth_of(s: &Session, hwnd: HWND) -> u32 {
-    let mut d = 0;
-    let mut cur = Some(hwnd);
-    while let Some(h) = cur {
-        d += 1;
-        cur = menu_index(s, h).and_then(|i| s.windows[i].parent);
-    }
-    d
 }
 
 fn first_enabled(rows: &[Row]) -> Option<usize> {
@@ -1195,60 +1024,6 @@ fn scroll_to_row(menu: &mut Menu, item: usize) {
         }
         let max = (menu.layout.height - menu.view_height).max(0);
         menu.scroll = menu.scroll.clamp(0, max);
-    }
-}
-
-unsafe fn open_submenu(s: &mut Session, parent_idx: usize, item_idx: usize, select_first: bool) {
-    if s.windows[parent_idx].open == Some(item_idx) && s.windows[parent_idx].child.is_some() {
-        return;
-    }
-    if depth_of(s, s.windows[parent_idx].hwnd) >= MAX_MENU_DEPTH {
-        return;
-    }
-    let parent_hwnd = s.windows[parent_idx].hwnd;
-    let depth = s.windows[parent_idx].depth + 1;
-    let (items, anchor) = {
-        let menu = &s.windows[parent_idx];
-        let Some(row) = row_for_item(menu, item_idx) else {
-            return;
-        };
-        let Item::Submenu { items, .. } = &menu.items[item_idx] else {
-            return;
-        };
-        // `row.rect` is in layout space, so subtract the current scroll
-        // offset before converting to screen coordinates. The x coordinate
-        // only influences monitor/DPI detection for the new window.
-        let mut pt = POINT {
-            x: menu.layout.width,
-            y: row.rect.top - menu.scroll,
-        };
-        let _ = ClientToScreen(menu.hwnd, &mut pt);
-        (items.clone(), pt)
-    };
-
-    if s.windows[parent_idx].child.is_some() {
-        close_submenu(s, parent_idx, true);
-    }
-    let work = work_area_from_window(parent_hwnd);
-    let max_h = (work.bottom - work.top - scale(8, 96)).max(scale(120, 96));
-    let parent_idx = menu_index(s, parent_hwnd).unwrap_or(parent_idx);
-    s.opening = true;
-    let created = create_menu(s, items, Some(parent_hwnd), depth, anchor, max_h);
-    s.opening = false;
-    if let Some(child) = created {
-        s.windows[parent_idx].child = Some(child);
-        s.windows[parent_idx].open = Some(item_idx);
-        refresh_content(&s.windows[parent_idx]);
-        if select_first {
-            if let Some(ci) = menu_index(s, child) {
-                let first = first_enabled(&s.windows[ci].layout.rows);
-                s.windows[ci].hot = first;
-                if let Some(first) = first {
-                    scroll_to_row(&mut s.windows[ci], first);
-                }
-                refresh_content(&s.windows[ci]);
-            }
-        }
     }
 }
 
@@ -1280,9 +1055,6 @@ fn move_selection(s: &mut Session, idx: usize, delta: i32, absolute: Option<bool
         }
     };
     let item = enabled[next_pos];
-    if menu.child.is_some() {
-        close_submenu(s, idx, false);
-    }
     s.windows[idx].hot = Some(item);
     scroll_to_row(&mut s.windows[idx], item);
     unsafe {
@@ -1290,14 +1062,13 @@ fn move_selection(s: &mut Session, idx: usize, delta: i32, absolute: Option<bool
     }
 }
 
-unsafe fn activate_item(s: &mut Session, idx: usize, item: usize, select_first: bool) {
+unsafe fn activate_item(s: &mut Session, idx: usize, item: usize) {
     match &s.windows[idx].items[item] {
         Item::Action { id, .. } | Item::Check { id, .. } => {
             let id = *id;
             close_session(s, Some(id));
         }
-        Item::Submenu { .. } => open_submenu(s, idx, item, select_first),
-        Item::Disabled { .. } | Item::Separator => {}
+        Item::Separator => {}
     }
 }
 
@@ -1329,16 +1100,6 @@ fn hit_test(menu: &Menu, x: i32, y: i32) -> Option<usize> {
         .iter()
         .find(|r| cy >= r.rect.top && cy < r.rect.bottom && is_enabled(r.kind))
         .map(|r| r.item)
-}
-
-unsafe fn start_hover_timer(menu: &Menu) {
-    if let Some(item) = menu.hot {
-        if matches!(menu.items[item], Item::Submenu { .. }) && menu.open != Some(item) {
-            let _ = SetTimer(Some(menu.hwnd), HOVER_TIMER, HOVER_MS, None);
-            return;
-        }
-    }
-    let _ = KillTimer(Some(menu.hwnd), HOVER_TIMER);
 }
 
 unsafe fn ensure_mouse_tracking(hwnd: HWND) {
@@ -1381,61 +1142,39 @@ unsafe fn handle_glass_message(
         WM_MOUSEMOVE => {
             let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            // Windows can deliver a duplicate move when another menu window
-            // appears under a stationary cursor. Ignoring it preserves the
-            // keyboard selection and keeps a just-opened submenu open.
+            // Windows can deliver a duplicate move when the window appears
+            // under a stationary cursor; ignore it to keep keyboard selection.
             if s.windows[idx].last_mouse == Some((x, y)) {
                 return LRESULT(0);
             }
             s.windows[idx].last_mouse = Some((x, y));
             ensure_mouse_tracking(hwnd);
             let new_hot = hit_test(&s.windows[idx], x, y);
-            let old_hot = s.windows[idx].hot;
-            let open = s.windows[idx].open;
-            let has_child = s.windows[idx].child.is_some();
-            if has_child && new_hot.is_some() && new_hot != open {
-                close_submenu(s, idx, false);
-            }
-            if new_hot != old_hot {
+            if new_hot != s.windows[idx].hot {
                 s.windows[idx].hot = new_hot;
                 refresh_content(&s.windows[idx]);
-                // A held mouse button must not auto-open a submenu.
-                if s.windows[idx].pressed.is_none() {
-                    start_hover_timer(&s.windows[idx]);
-                } else {
-                    let _ = KillTimer(Some(hwnd), HOVER_TIMER);
-                }
             }
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
             s.windows[idx].pressed = None;
             s.windows[idx].last_mouse = None;
-            let has_child = s.windows[idx].child.is_some();
             let old_hot = s.windows[idx].hot;
-            if !has_child {
-                s.windows[idx].hot = None;
-                if old_hot.is_some() {
-                    refresh_content(&s.windows[idx]);
-                }
+            s.windows[idx].hot = None;
+            if old_hot.is_some() {
+                refresh_content(&s.windows[idx]);
             }
-            let _ = KillTimer(Some(hwnd), HOVER_TIMER);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
             let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            if s.windows[idx].child.is_some() {
-                close_submenu(s, idx, false);
-            }
             let pressed = hit_test(&s.windows[idx], x, y);
             s.windows[idx].pressed = pressed;
             if pressed != s.windows[idx].hot {
                 s.windows[idx].hot = pressed;
                 refresh_content(&s.windows[idx]);
             }
-            // Do not let the hover timer open a submenu while the button is held.
-            let _ = KillTimer(Some(hwnd), HOVER_TIMER);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1445,14 +1184,13 @@ unsafe fn handle_glass_message(
             let over = hit_test(&s.windows[idx], x, y);
             if let Some(item) = pressed {
                 if over == Some(item) {
-                    activate_item(s, idx, item, false);
+                    activate_item(s, idx, item);
                     return LRESULT(0);
                 }
             }
             if over != s.windows[idx].hot {
                 s.windows[idx].hot = over;
                 refresh_content(&s.windows[idx]);
-                start_hover_timer(&s.windows[idx]);
             }
             LRESULT(0)
         }
@@ -1463,11 +1201,6 @@ unsafe fn handle_glass_message(
                 let max = (s.windows[idx].layout.height - s.windows[idx].view_height).max(0);
                 let scroll = (s.windows[idx].scroll - delta / 120 * step).clamp(0, max);
                 if scroll != s.windows[idx].scroll {
-                    // The submenu is anchored to a row, so it cannot stay open
-                    // while the parent list scrolls away from under it.
-                    if s.windows[idx].child.is_some() {
-                        close_submenu(s, idx, false);
-                    }
                     s.windows[idx].pressed = None;
                     s.windows[idx].scroll = scroll;
                     // Re-hit-test the cursor: scrolling moves the rows under it.
@@ -1481,20 +1214,6 @@ unsafe fn handle_glass_message(
                     };
                     s.windows[idx].hot = hot;
                     refresh_content(&s.windows[idx]);
-                    start_hover_timer(&s.windows[idx]);
-                }
-            }
-            LRESULT(0)
-        }
-        WM_TIMER => {
-            if wp.0 == HOVER_TIMER {
-                let _ = KillTimer(Some(hwnd), HOVER_TIMER);
-                if let Some(item) = s.windows[idx].hot {
-                    if matches!(s.windows[idx].items[item], Item::Submenu { .. })
-                        && s.windows[idx].open != Some(item)
-                    {
-                        open_submenu(s, idx, item, false);
-                    }
                 }
             }
             LRESULT(0)
@@ -1502,15 +1221,7 @@ unsafe fn handle_glass_message(
         WM_KEYDOWN => {
             let vk = wp.0 as u16;
             if vk == VK_ESCAPE.0 || vk == VK_LEFT.0 {
-                if s.windows[idx].child.is_some() {
-                    close_submenu(s, idx, true);
-                } else if let Some(parent) = s.windows[idx].parent {
-                    if let Some(pi) = menu_index(s, parent) {
-                        close_submenu(s, pi, true);
-                    }
-                } else {
-                    close_session(s, None);
-                }
+                close_session(s, None);
                 return LRESULT(0);
             }
             if vk == VK_UP.0 {
@@ -1529,19 +1240,11 @@ unsafe fn handle_glass_message(
                 move_selection(s, idx, -1, Some(false));
                 return LRESULT(0);
             }
-            if vk == VK_RIGHT.0 {
-                if let Some(item) = s.windows[idx].hot {
-                    if matches!(s.windows[idx].items[item], Item::Submenu { .. }) {
-                        open_submenu(s, idx, item, true);
-                    }
-                }
-                return LRESULT(0);
-            }
             if vk == VK_RETURN.0 || vk == VK_SPACE.0 {
                 if let Some(item) = s.windows[idx].hot {
-                    activate_item(s, idx, item, true);
+                    activate_item(s, idx, item);
                 } else if let Some(item) = first_enabled(&s.windows[idx].layout.rows) {
-                    activate_item(s, idx, item, true);
+                    activate_item(s, idx, item);
                 }
                 return LRESULT(0);
             }
@@ -1587,7 +1290,7 @@ unsafe fn handle_glass_message(
         }
         WM_ACTIVATE => {
             let state = (wp.0 & 0xFFFF) as u32;
-            if state == WA_INACTIVE && !s.opening && !s.done {
+            if state == WA_INACTIVE && !s.done {
                 let active = GetForegroundWindow();
                 if !is_session_window(s, active) {
                     close_session(s, None);
@@ -1671,7 +1374,6 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
             previous,
             done: false,
             result: None,
-            opening: false,
         });
 
         let items = build_model(cfg);
@@ -1679,7 +1381,7 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         let max_h = (work.bottom - work.top - scale(8, 96)).max(scale(120, 96));
         let root = {
             let s = session().unwrap();
-            create_menu(s, items, None, 0, cursor, max_h)
+            create_menu(s, items, cursor, max_h)
         };
         let Some(root) = root else {
             let _ = cleanup_session();
@@ -1734,8 +1436,6 @@ mod tests {
         Menu {
             hwnd: HWND::default(),
             content: HWND::default(),
-            parent: None,
-            depth: 0,
             items: Vec::new(),
             layout: Layout {
                 width: 200,
@@ -1743,7 +1443,6 @@ mod tests {
                 dpi: 96,
                 pad_x: scale(PAD_X96, 96),
                 check_w: scale(CHECK_W96, 96),
-                arrow_w: scale(ARROW_W96, 96),
                 radius: scale(RADIUS96, 96),
                 rows,
                 font: HFONT::default(),
@@ -1753,21 +1452,19 @@ mod tests {
             hot: None,
             pressed: None,
             last_mouse: None,
-            open: None,
-            child: None,
             accent: false,
         }
     }
 
     #[test]
-    fn hit_test_uses_scroll_offset_and_skips_disabled_rows() {
+    fn hit_test_uses_scroll_offset_and_skips_separators() {
         let mut m = menu(
             120,
             60,
             vec![
                 row(0, 0, 30, RowKind::Action),
-                row(1, 30, 60, RowKind::Submenu),
-                row(2, 60, 90, RowKind::Disabled),
+                row(1, 30, 60, RowKind::Check),
+                row(2, 60, 90, RowKind::Separator),
             ],
         );
         assert_eq!(hit_test(&m, 10, 10), Some(0));
@@ -1785,7 +1482,7 @@ mod tests {
             60,
             vec![
                 row(0, 0, 30, RowKind::Action),
-                row(1, 30, 60, RowKind::Submenu),
+                row(1, 30, 60, RowKind::Check),
             ],
         );
         // width 200, pad_x 12, track 2 -> indicator occupies x 193..195.
