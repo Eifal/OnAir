@@ -72,8 +72,9 @@ pub fn canonical_hex(field: ColorField) -> String {
     hex_label(r, g, b)
 }
 
-/// Luminance-based contrast decision for text drawn on the preview swatch.
-pub fn prefers_dark_text(red: u8, green: u8, blue: u8) -> bool {
+/// Luminance-based contrast decision for text drawn on the preview swatch:
+/// dark backgrounds need light text.
+pub fn prefers_light_text(red: u8, green: u8, blue: u8) -> bool {
     let r = f32::from(red) / 255.0;
     let g = f32::from(green) / 255.0;
     let b = f32::from(blue) / 255.0;
@@ -163,7 +164,7 @@ pub fn push_props(ui: &AppWindow, state: &PickerState) {
     ui.set_picker_title(field_title(state.field).into());
     ui.set_picker_hex(state.hex().as_str().into());
     ui.set_picker_preview(slint::Color::from_rgb_u8(r, g, b));
-    ui.set_picker_preview_dark(prefers_dark_text(r, g, b));
+    ui.set_picker_preview_dark(prefers_light_text(r, g, b));
     ui.set_picker_value_top(slint::Color::from_rgb_u8(top_r, top_g, top_b));
     ui.set_picker_value(state.v);
     let (x, y) = marker_pos(state);
