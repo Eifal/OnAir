@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "onair"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "onair-config",
  "windows",
@@ -2805,11 +2805,11 @@ dependencies = [
 
 [[package]]
 name = "onair-config"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "onair-settings"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "onair-config",
  "raw-window-handle",
