@@ -19,10 +19,11 @@ use onair_config::{
 use slint::{ComponentHandle, SharedString};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
+    BringWindowToTop, FindWindowW, GetForegroundWindow, GetWindowThreadProcessId,
+    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
 };
 
 slint::include_modules!();
@@ -69,10 +70,25 @@ fn acquire_single_instance() -> bool {
 fn focus_existing() {
     let title = wide(WINDOW_TITLE);
     unsafe {
-        if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
+        let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) else {
+            return;
+        };
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+
+        // SetForegroundWindow alone is often ignored while another process
+        // owns the foreground. Briefly attach to that thread (the standard
+        // fallback), raise the window, then detach again.
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
         }
+        let _ = BringWindowToTop(hwnd);
     }
 }
 
@@ -877,18 +893,30 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // The winit backend creates the native window when the event loop starts,
-    // so the frame styling is applied from the first UI-thread timer tick.
-    let weak = ui.as_weak();
-    let frame_timer = slint::Timer::default();
-    frame_timer.start(
-        slint::TimerMode::SingleShot,
-        Duration::from_millis(80),
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                window_style::apply_frame(&ui, dark);
-            }
-        },
-    );
+    // so poll for the handle instead of assuming one fixed delay. Stop as soon
+    // as the DWM attributes are applied, or after roughly two seconds if the
+    // backend never exposes a Win32 handle.
+    let frame_timer = Rc::new(slint::Timer::default());
+    {
+        let weak_ui = ui.as_weak();
+        let timer = Rc::downgrade(&frame_timer);
+        let mut attempts = 0u32;
+        frame_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
+                attempts += 1;
+                if window_style::apply_frame(&ui, dark) || attempts >= 120 {
+                    if let Some(timer) = timer.upgrade() {
+                        timer.stop();
+                    }
+                }
+            },
+        );
+    }
 
     ui.run()
 }

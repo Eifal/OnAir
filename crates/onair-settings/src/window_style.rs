@@ -12,16 +12,17 @@ use windows::Win32::Graphics::Dwm::{
 
 use crate::AppWindow;
 
-/// Apply DWM attributes after the Slint window has a native handle (call
-/// after `show`, before `run`). Failures are intentionally ignored: themed
+/// Apply DWM attributes once the Slint window has a native handle. Returns
+/// false when the handle is not available yet (the caller retries), and true
+/// once the attributes were applied. Failures afterwards are ignored: themed
 /// title bars are cosmetic and unsupported on older builds.
-pub fn apply_frame(ui: &AppWindow, dark: bool) {
+pub fn apply_frame(ui: &AppWindow, dark: bool) -> bool {
     let window_handle = ui.window().window_handle();
     let Ok(handle) = HasWindowHandle::window_handle(&window_handle) else {
-        return;
+        return false;
     };
     let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return;
+        return false;
     };
     let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
 
@@ -41,4 +42,5 @@ pub fn apply_frame(ui: &AppWindow, dark: bool) {
             std::mem::size_of_val(&corners) as u32,
         );
     }
+    true
 }
