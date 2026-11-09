@@ -30,7 +30,7 @@ newer toolchain (Slint requires Rust 1.92).
 cargo build --release -p onair            # overlay   -> target\release\onair.exe
 cargo build --release -p onair-settings   # settings  -> target\release\onair-settings.exe
 # or build both:
-cargo build --release                     # the workspace default members
+cargo build --release --workspace         # both binaries
 ```
 
 Both binaries ship **next to each other**; the settings app is launched
