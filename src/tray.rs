@@ -11,6 +11,7 @@ use crate::window::{to_wide, WM_TRAY};
 pub const ID_LOCK: u32 = 1000;
 pub const ID_TOPMOST: u32 = 1001;
 pub const ID_SETTINGS: u32 = 1002;
+pub const ID_VISIBLE: u32 = 1003;
 pub const ID_QUIT: u32 = 1502;
 
 const TRAY_UID: u32 = 1;
@@ -59,6 +60,7 @@ pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
         Item::Separator,
         Item::check(ID_LOCK, "Lock position", cfg.locked),
         Item::check(ID_TOPMOST, "Always on top", cfg.always_on_top),
+        Item::check(ID_VISIBLE, "Show overlay", cfg.overlay_visible),
         Item::Separator,
         Item::action(ID_QUIT, "Quit"),
     ]
@@ -292,6 +294,7 @@ mod tests {
         let cfg = AppConfig {
             locked: true,
             always_on_top: false,
+            overlay_visible: false,
             ..Default::default()
         };
         let model = build_model(&cfg);
@@ -311,6 +314,11 @@ mod tests {
                 Item::Check {
                     id: ID_TOPMOST,
                     label: "Always on top".into(),
+                    checked: false
+                },
+                Item::Check {
+                    id: ID_VISIBLE,
+                    label: "Show overlay".into(),
                     checked: false
                 },
                 Item::Separator,

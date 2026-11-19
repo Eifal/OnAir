@@ -17,7 +17,10 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use config::{AppConfig, ConfigKey, MenuStyle, MouseBtn, ToggleKey, TriggerMode, VmMode};
+use config::{
+    parse_macro_script, AppConfig, ConfigKey, MacroMode, MacroOp, MacroStep, MenuStyle, MouseBtn,
+    ToggleKey, Trigger, TriggerMode, VmMode,
+};
 use vm::{MicState, VmClient};
 use window::{
     apply_lock, apply_pos, apply_topmost, clamp_position, nudge_into_view, to_wide, window_rect,
@@ -34,7 +37,18 @@ const OVERLAY_KEYS: &[ConfigKey] = &[
     ConfigKey::Y,
     ConfigKey::Locked,
     ConfigKey::AlwaysOnTop,
+    ConfigKey::OverlayVisible,
 ];
+
+/// Per-macro state between key-down and key-up.
+#[derive(Default)]
+struct MacroRuntime {
+    held: bool,
+    /// Raw parameter values read on key-down, used when the macro has no
+    /// release script (Hold/Both restore the previous values).
+    saved: Vec<(String, f32)>,
+    down_at: Option<std::time::Instant>,
+}
 
 struct AppState {
     cfg: AppConfig,
@@ -48,6 +62,11 @@ struct AppState {
     // exists, so refresh_tray() must not send NIM_MODIFY yet.
     tray_ready: bool,
     capture_until: Option<std::time::Instant>,
+    /// 0 = overlay hotkey, 1 + i = macro i.
+    capture_target: usize,
+    /// Parsed press/release scripts, index-aligned with cfg.macros.
+    macro_steps: Vec<(Vec<MacroStep>, Vec<MacroStep>)>,
+    macro_runtime: Vec<MacroRuntime>,
     // Hold-to-talk tracking: true between a matched key-down and key-up.
     hold_held: bool,
     // Display state saved on key-down (true=ON/green, false=OFF/red).
@@ -109,6 +128,14 @@ fn redraw_locked() {
     };
     let pixels = render::draw_overlay(size, bg, dot, !locked, style, bg_op);
     render::update_layered_window(hwnd, &pixels, size, opacity);
+}
+
+/// Show or hide the overlay window. Hooks, macros and the tray icon stay
+/// active while it is hidden, so the mic hotkey keeps working.
+fn apply_visibility(hwnd: HWND, visible: bool) {
+    unsafe {
+        let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
 }
 
 fn refresh_tray() {
@@ -359,45 +386,200 @@ fn restore_hold_if_held() {
     do_hold_up_restore();
 }
 
-/// Check an incoming WM_KEY_DOWN/UP against the current bind (guards
-/// against stale queued messages after the bind changed).
-fn key_event_matches(kind: usize, code: usize) -> bool {
-    let bind = app_mut().cfg.toggle_key;
-    match bind {
-        ToggleKey::None => false,
-        ToggleKey::Key(vk) => kind == hotkey::CAP_KEY && code == vk as usize,
-        ToggleKey::Mouse(b) => kind == hotkey::CAP_MOUSE && code == b.id() as usize,
+/// Index-aligned trigger list for the hook. Built from cfg.macros.
+fn macro_triggers(cfg: &AppConfig) -> Vec<Trigger> {
+    cfg.macros.iter().map(|m| m.trigger).collect()
+}
+
+/// Reparse macro scripts and reset per-macro runtime state. Called whenever
+/// cfg.macros changes; scripts that fail to parse become no-ops (the settings
+/// window validates them before saving).
+fn rebuild_macro_state(a: &mut AppState) {
+    a.macro_steps = a
+        .cfg
+        .macros
+        .iter()
+        .map(|m| {
+            (
+                parse_macro_script(&m.press).unwrap_or_default(),
+                parse_macro_script(&m.release).unwrap_or_default(),
+            )
+        })
+        .collect();
+    a.macro_runtime = a
+        .cfg
+        .macros
+        .iter()
+        .map(|_| MacroRuntime::default())
+        .collect();
+}
+
+/// Execute parsed Voicemeeter requests in order. Silent on any failure.
+fn run_steps(steps: &[MacroStep]) {
+    for step in steps {
+        match step.op {
+            MacroOp::Set(value) => {
+                app_mut().vm.set_raw(&step.param, value);
+            }
+            MacroOp::Toggle => {
+                let param = step.param.clone();
+                app_mut().vm.toggle_param(&param);
+            }
+            MacroOp::Add(delta) => run_relative(&step.param, delta),
+            MacroOp::Sub(delta) => run_relative(&step.param, -delta),
+        }
     }
 }
 
-fn on_key_down(kind: usize, code: usize) {
-    if !key_event_matches(kind, code) {
+/// Read-modify-write for `+=` / `-=` requests.
+fn run_relative(param: &str, delta: f32) {
+    if let Some(current) = app_mut().vm.read_raw(param) {
+        app_mut().vm.set_raw(param, current + delta);
+    }
+}
+
+/// Snapshot the raw values touched by a macro so Hold/Both can restore them
+/// when no release script is configured.
+fn snapshot_params(steps: &[MacroStep]) -> Vec<(String, f32)> {
+    let mut saved: Vec<(String, f32)> = Vec::new();
+    for step in steps {
+        if saved.iter().any(|(param, _)| param == &step.param) {
+            continue;
+        }
+        if let Some(value) = app_mut().vm.read_raw(&step.param) {
+            saved.push((step.param.clone(), value));
+        }
+    }
+    saved
+}
+
+fn do_macro_down(index: usize) {
+    if index >= app_mut().cfg.macros.len() || index >= app_mut().macro_steps.len() {
         return;
     }
-    match app_mut().cfg.trigger_mode {
-        TriggerMode::Toggle => do_toggle(),
-        TriggerMode::Hold | TriggerMode::Both => do_hold_down(),
+    if app_mut().macro_runtime[index].held {
+        return; // auto-repeat guard (backup for the hook-side filter)
     }
+    let (mode, press_steps, has_release) = {
+        let a = app_mut();
+        (
+            a.cfg.macros[index].mode,
+            a.macro_steps[index].0.clone(),
+            !a.macro_steps[index].1.is_empty(),
+        )
+    };
+    let saved = if mode != MacroMode::Press && !has_release {
+        snapshot_params(&press_steps)
+    } else {
+        Vec::new()
+    };
+    {
+        let runtime = &mut app_mut().macro_runtime[index];
+        runtime.held = true;
+        runtime.saved = saved;
+        runtime.down_at = Some(std::time::Instant::now());
+    }
+    run_steps(&press_steps);
+    do_poll_and_update();
 }
 
-fn on_key_up(kind: usize, code: usize) {
-    if !key_event_matches(kind, code) {
-        // Stale up for a previous bind: drop any latch so the next
-        // press starts clean. No VM write (bind already changed).
-        reset_hold_tracking();
+fn do_macro_up(index: usize) {
+    if index >= app_mut().cfg.macros.len() || index >= app_mut().macro_runtime.len() {
         return;
     }
-    match app_mut().cfg.trigger_mode {
-        TriggerMode::Toggle => {}
-        TriggerMode::Hold => do_hold_up_restore(),
-        TriggerMode::Both => do_hold_up_both(),
+    let (mode, release_steps, saved, down_at, held) = {
+        let a = app_mut();
+        let runtime = &a.macro_runtime[index];
+        (
+            a.cfg.macros[index].mode,
+            a.macro_steps[index].1.clone(),
+            runtime.saved.clone(),
+            runtime.down_at,
+            runtime.held,
+        )
+    };
+    if !held {
+        return;
+    }
+    {
+        let runtime = &mut app_mut().macro_runtime[index];
+        runtime.held = false;
+        runtime.saved.clear();
+        runtime.down_at = None;
+    }
+    let fire_release = match mode {
+        MacroMode::Press => false,
+        MacroMode::Hold => true,
+        MacroMode::Both => {
+            let threshold = app_mut().cfg.hold_tap_ms as u64;
+            down_at
+                .map(|t| t.elapsed().as_millis() as u64 >= threshold)
+                .unwrap_or(true)
+        }
+    };
+    if !fire_release {
+        return;
+    }
+    if release_steps.is_empty() {
+        for (param, value) in &saved {
+            app_mut().vm.set_raw(param, *value);
+        }
+    } else {
+        run_steps(&release_steps);
+    }
+    do_poll_and_update();
+}
+
+/// Release every held macro with its restore/release script (reload, quit).
+fn restore_macros_if_held() {
+    let held: Vec<usize> = (0..app_mut().macro_runtime.len())
+        .filter(|&i| app_mut().macro_runtime[i].held)
+        .collect();
+    for index in held {
+        do_macro_up(index);
     }
 }
 
-fn begin_capture() {
+/// Drop macro tracking without touching Voicemeeter (config changed).
+fn reset_macro_tracking() {
+    for runtime in app_mut().macro_runtime.iter_mut() {
+        runtime.held = false;
+        runtime.saved.clear();
+        runtime.down_at = None;
+    }
+}
+
+fn on_key_down(action: usize) {
+    if action == hotkey::ACTION_TOGGLE {
+        match app_mut().cfg.trigger_mode {
+            TriggerMode::Toggle => do_toggle(),
+            TriggerMode::Hold | TriggerMode::Both => do_hold_down(),
+        }
+    } else {
+        do_macro_down(action - 1);
+    }
+}
+
+fn on_key_up(action: usize) {
+    if action == hotkey::ACTION_TOGGLE {
+        match app_mut().cfg.trigger_mode {
+            TriggerMode::Toggle => {}
+            TriggerMode::Hold => do_hold_up_restore(),
+            TriggerMode::Both => do_hold_up_both(),
+        }
+    } else {
+        do_macro_up(action - 1);
+    }
+}
+
+fn begin_capture(target: usize) {
     hotkey::set_capturing(true);
-    app_mut().capture_until =
-        Some(std::time::Instant::now() + std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS));
+    {
+        let a = app_mut();
+        a.capture_target = target;
+        a.capture_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS));
+    }
     let hwnd = app_mut().hwnd;
     let cur = app_mut().tray_icon.unwrap_or_default();
     tray::modify_tray(
@@ -421,7 +603,9 @@ fn apply_all_after_config_change() {
     // This reset is only a safety net and intentionally performs no VM
     // write, because the old parameter is no longer available here.
     reset_hold_tracking();
-    let (hwnd, x, y, size, locked, topmost, poll_ms) = {
+    reset_macro_tracking();
+    rebuild_macro_state(app_mut());
+    let (hwnd, x, y, size, locked, topmost, poll_ms, visible) = {
         let a = app_mut();
         (
             a.hwnd,
@@ -431,6 +615,7 @@ fn apply_all_after_config_change() {
             a.cfg.locked,
             a.cfg.always_on_top,
             a.cfg.poll_ms,
+            a.cfg.overlay_visible,
         )
     };
     // Reload is not a user-chosen move: keep the live position and only
@@ -445,8 +630,14 @@ fn apply_all_after_config_change() {
     apply_pos(hwnd, cx, cy, size);
     apply_lock(hwnd, locked);
     apply_topmost(hwnd, topmost);
-    // Keep the hook shadow bind in sync (bind may have come from the file).
-    hotkey::set_bind(app_mut().cfg.toggle_key);
+    apply_visibility(hwnd, visible);
+    // Keep the hook shadow triggers in sync (bind/macros may have come from
+    // the file).
+    {
+        let bind = app_mut().cfg.toggle_trigger();
+        let macros = macro_triggers(&app_mut().cfg);
+        hotkey::set_bind(bind, macros);
+    }
     unsafe {
         let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
         let _ = SetTimer(Some(hwnd), window::TIMER_POLL, poll_ms, None);
@@ -497,6 +688,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     if reload_msg != 0 && msg == reload_msg {
         if unsafe { APP.is_some() } {
             restore_hold_if_held();
+            restore_macros_if_held();
             let cfg = AppConfig::load();
             app_mut().cfg = cfg;
             apply_all_after_config_change();
@@ -506,7 +698,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     if capture_msg != 0 && msg == capture_msg {
         if unsafe { APP.is_some() } {
             restore_hold_if_held();
-            begin_capture();
+            restore_macros_if_held();
+            begin_capture(wparam.0);
         }
         return LRESULT(0);
     }
@@ -706,20 +899,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         m if m == window::WM_KEY_DOWN => {
-            // Global bind pressed (event already passed through to the
-            // system by the hook proc).
-            on_key_down(wparam.0, lparam.0 as usize);
+            // Global trigger pressed (event already passed through to the
+            // system by the hook proc). wparam is the action id.
+            on_key_down(wparam.0);
             LRESULT(0)
         }
         m if m == window::WM_KEY_UP => {
-            // Global bind released.
-            on_key_up(wparam.0, lparam.0 as usize);
+            // Global trigger released.
+            on_key_up(wparam.0);
             LRESULT(0)
         }
         m if m == window::WM_KEY_CAPTURED => {
             if hotkey::is_capturing() {
-                let kind = wparam.0;
+                let kind = hotkey::captured_kind(wparam.0);
                 let code = lparam.0 as usize;
+                let mods = hotkey::captured_mods(wparam.0);
                 let key = match kind {
                     hotkey::CAP_KEY => ToggleKey::Key(code as u16),
                     hotkey::CAP_MOUSE => MouseBtn::from_id(code as u8)
@@ -730,9 +924,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 hotkey::set_capturing(false);
                 app_mut().capture_until = None;
                 if !key.is_none() {
-                    app_mut().cfg.toggle_key = key;
-                    hotkey::set_bind(key);
-                    let _ = app_mut().cfg.save_keys(&[ConfigKey::ToggleKey]);
+                    let trigger = Trigger { key, mods };
+                    let target = app_mut().capture_target;
+                    if target == 0 {
+                        {
+                            let a = app_mut();
+                            a.cfg.toggle_key = key;
+                            a.cfg.toggle_mods = mods;
+                        }
+                        let macros = macro_triggers(&app_mut().cfg);
+                        hotkey::set_bind(trigger, macros);
+                        let _ = app_mut().cfg.save_keys(&[ConfigKey::ToggleKey]);
+                    } else {
+                        // Hand the trigger to onair-settings, which owns the
+                        // macro list. Writing it here would clobber unsaved
+                        // drafts in the settings window.
+                        let index = target - 1;
+                        app_mut().cfg.macro_capture = format!("{index}|{}", trigger.name());
+                        let _ = app_mut().cfg.save_keys(&[ConfigKey::MacroCapture]);
+                    }
                 }
                 refresh_tray();
             }
@@ -748,6 +958,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // process is terminated; WM_DESTROY may not be sent in time.
             if wparam.0 != 0 {
                 restore_hold_if_held();
+                restore_macros_if_held();
             }
             LRESULT(0)
         }
@@ -755,6 +966,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Safety net for any destruction path that did not go through
             // ID_QUIT (for example DefWindowProc handling WM_CLOSE).
             restore_hold_if_held();
+            restore_macros_if_held();
             app_mut().vm.shutdown();
             unsafe {
                 let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
@@ -788,6 +1000,7 @@ fn handle_command(hwnd: HWND, id: u32) {
         // Release a held PTT before destroying the window. Otherwise the
         // mic can stay ON after the app exits.
         restore_hold_if_held();
+        restore_macros_if_held();
         let _ = app_mut().cfg.save_keys(OVERLAY_KEYS);
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -807,6 +1020,13 @@ fn handle_command(hwnd: HWND, id: u32) {
         app_mut().cfg.always_on_top = v;
         apply_topmost(hwnd, v);
         let _ = app_mut().cfg.save_keys(&[ConfigKey::AlwaysOnTop]);
+        return;
+    }
+    if id == ID_VISIBLE {
+        let v = !app_mut().cfg.overlay_visible;
+        app_mut().cfg.overlay_visible = v;
+        apply_visibility(hwnd, v);
+        let _ = app_mut().cfg.save_keys(&[ConfigKey::OverlayVisible]);
         return;
     }
     if id == ID_SETTINGS {
@@ -899,6 +1119,9 @@ fn main() {
             tray_icon: None,
             tray_ready: false,
             capture_until: None,
+            capture_target: 0,
+            macro_steps: Vec::new(),
+            macro_runtime: Vec::new(),
             hold_held: false,
             hold_saved_on: None,
             hold_saved_switch: None,
@@ -906,6 +1129,7 @@ fn main() {
             reload_msg,
             capture_msg,
         });
+        rebuild_macro_state(app_mut());
 
         // First poll + paint before showing (avoids gray flash when VM running? still gray on miss)
         do_poll_and_update();
@@ -937,15 +1161,21 @@ fn main() {
             a.tray_ready = true;
         }
 
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let show = if app_mut().cfg.overlay_visible {
+            SW_SHOWNOACTIVATE
+        } else {
+            SW_HIDE
+        };
+        let _ = ShowWindow(hwnd, show);
         // NOTE: no SetFocus / SetActiveWindow anywhere. All SetWindowPos use NOACTIVATE.
 
         // Global keybind hooks (low-level keyboard + mouse).
         // Installed just before the message loop so hook events can only
         // arrive once we are pumping messages. Inactive if it fails.
         {
-            let mic_bind = app_mut().cfg.toggle_key;
-            hotkey::init(hwnd, hinstance, mic_bind);
+            let bind = app_mut().cfg.toggle_trigger();
+            let macros = macro_triggers(&app_mut().cfg);
+            hotkey::init(hwnd, hinstance, bind, macros);
         }
 
         let poll = app_mut().cfg.poll_ms;

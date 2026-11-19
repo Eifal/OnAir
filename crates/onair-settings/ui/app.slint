@@ -7,6 +7,7 @@ import { GeneralPage } from "general.slint";
 import { AppearancePage } from "appearance.slint";
 import { VoicemeeterPage } from "voicemeeter.slint";
 import { HotkeyPage } from "hotkey.slint";
+import { MacrosPage } from "macros.slint";
 import { AboutPage } from "about.slint";
 
 export component AppWindow inherits Window {
@@ -44,6 +45,7 @@ export component AppWindow inherits Window {
     in-out property <int> opacity-value: 90;
     in-out property <bool> locked: false;
     in-out property <bool> stay-on-top: true;
+    in-out property <bool> overlay-visible: true;
     in-out property <string> menu-style: "glass";
 
     in-out property <string> visual-style: "dot";
@@ -83,6 +85,19 @@ export component AppWindow inherits Window {
     in-out property <string> trigger-mode: "toggle";
     in-out property <int> hold-ms: 300;
 
+    // Macro editor. Rust owns the draft list; the selected slot's fields are
+    // mirrored here so typing never rebuilds the model under the cursor.
+    in-out property <[string]> macro-names: [];
+    in-out property <int> macro-selected: -1;
+    in property <bool> macro-editing: false;
+    in-out property <string> macro-label: "";
+    in property <string> macro-trigger: "None";
+    in property <bool> macro-trigger-set: false;
+    in-out property <int> macro-mode-index: 0;
+    in-out property <string> macro-press: "";
+    in-out property <string> macro-release: "";
+    in property <int> capture-macro-index: -1;
+
     callback apply-now(string, string);
     callback apply-later(string, string);
     callback open-config;
@@ -91,6 +106,12 @@ export component AppWindow inherits Window {
     callback clear-key;
     callback poll-backend;
     callback flush-edits;
+    callback macro-select(int);
+    callback macro-add();
+    callback macro-delete();
+    callback macro-save();
+    callback macro-field(string, string);
+    callback macro-capture(int);
     callback open-picker(string);
     callback picker-disc-pointer(float, float);
     callback picker-value-pointer(float);
@@ -105,11 +126,13 @@ export component AppWindow inherits Window {
         : root.current-page == 1 ? "Appearance"
         : root.current-page == 2 ? "Voicemeeter"
         : root.current-page == 3 ? "Hotkey"
+        : root.current-page == 4 ? "Macros"
         : "About";
     property <string> page-subtitle: root.current-page == 0 ? "Window size, position lock and configuration."
         : root.current-page == 1 ? "Shape, colours and a live preview of the overlay."
         : root.current-page == 2 ? "Choose the Voicemeeter parameter OnAir reads and toggles."
         : root.current-page == 3 ? "Global key capture, trigger behaviour and timing."
+        : root.current-page == 4 ? "Extra global keys that run Voicemeeter requests, like MacroButtons."
         : "Version, files and privacy.";
 
     changed current-page => {
@@ -210,10 +233,16 @@ export component AppWindow inherits Window {
                         clicked => { root.current-page = 3; }
                     }
                     NavItem {
-                        label: "About";
-                        icon-kind: 4;
+                        label: "Macros";
+                        icon-kind: 5;
                         selected: root.current-page == 4;
                         clicked => { root.current-page = 4; }
+                    }
+                    NavItem {
+                        label: "About";
+                        icon-kind: 4;
+                        selected: root.current-page == 5;
+                        clicked => { root.current-page = 5; }
                     }
                 }
 
@@ -397,6 +426,7 @@ export component AppWindow inherits Window {
                         opacity-value <=> root.opacity-value;
                         locked <=> root.locked;
                         always-on-top <=> root.stay-on-top;
+                        overlay-visible <=> root.overlay-visible;
                         menu-style <=> root.menu-style;
                         config-path: root.config-path;
                         version: root.version;
@@ -463,7 +493,31 @@ export component AppWindow inherits Window {
                         clear-key => { root.clear-key(); }
                     }
 
-                    if root.current-page == 4: AboutPage {
+                    if root.current-page == 4: MacrosPage {
+                        width: 100%;
+                        macro-names: root.macro-names;
+                        macro-selected <=> root.macro-selected;
+                        macro-editing: root.macro-editing;
+                        macro-label <=> root.macro-label;
+                        macro-trigger: root.macro-trigger;
+                        macro-trigger-set: root.macro-trigger-set;
+                        macro-mode-index <=> root.macro-mode-index;
+                        macro-press <=> root.macro-press;
+                        macro-release <=> root.macro-release;
+                        capture-active: root.capture-active;
+                        capture-index: root.capture-macro-index;
+                        capture-message: root.capture-message;
+                        capture-remaining: root.capture-remaining;
+                        overlay-running: root.overlay-running;
+                        add => { root.macro-add(); }
+                        delete => { root.macro-delete(); }
+                        save => { root.macro-save(); }
+                        capture => { root.macro-capture(root.macro-selected); }
+                        select(i) => { root.macro-selected = i; root.macro-select(i); }
+                        field(f, v) => { root.macro-field(f, v); }
+                    }
+
+                    if root.current-page == 5: AboutPage {
                         width: 100%;
                         version: root.version;
                         config-path: root.config-path;

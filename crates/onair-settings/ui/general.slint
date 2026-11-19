@@ -6,6 +6,7 @@ export component GeneralPage inherits Rectangle {
     in-out property <int> opacity-value: 90;
     in-out property <bool> locked: false;
     in-out property <bool> always-on-top: true;
+    in-out property <bool> overlay-visible: true;
     in-out property <string> menu-style: "glass";
     in property <string> config-path: "";
     in property <string> version: "";
@@ -65,6 +66,16 @@ export component GeneralPage inherits Rectangle {
                 toggled(v) => {
                     root.always-on-top = v;
                     root.apply-now("always_on_top", v ? "true" : "false");
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            RowSwitch {
+                title: "Show overlay";
+                description: "Hide the on-screen indicator without stopping OnAir. Hotkeys and macros keep working, and the tray icon stays visible.";
+                checked <=> root.overlay-visible;
+                toggled(v) => {
+                    root.overlay-visible = v;
+                    root.apply-now("overlay_visible", v ? "true" : "false");
                 }
             }
         }

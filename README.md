@@ -94,8 +94,8 @@ Keyboard accessible; 100/125/150 % DPI clean.
 
 Pages:
 
-- **General** – size, opacity, lock position, always on top, tray menu
-  style (Glass acrylic / Native Win32).
+- **General** – size, opacity, lock position, always on top, show/hide the
+  overlay, tray menu style (Glass acrylic / Native Win32).
 - **Appearance** – visual style (Dot/Ring/Bar/Mini), background opacity,
   colours (on/off/unknown/background) with hex validation or a click-to-open
   HSV colour wheel (hue/saturation disc + value slider, Reset to defaults),
@@ -106,6 +106,8 @@ Pages:
 - **Hotkey** – capture the global toggle key (the overlay installs the
   low-level hook; Settings just asks it to and polls `config.ini`),
   trigger mode and hold/tap threshold.
+- **Macros** – any number of extra global keys that run Voicemeeter requests,
+  each with its own Press/Hold/Both behaviour and optional release script.
 - **About** – version, config file / folder open, privacy statement,
   Slint attribution.
 
@@ -127,6 +129,7 @@ size=48
 opacity=90
 locked=false
 always_on_top=true
+overlay_visible=true
 vm_mode=toggle
 vm_param=Strip[0].B2
 vm_param_b=Strip[0].B1
@@ -142,6 +145,8 @@ color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
 color_bg=141414
+macro=Ctrl+Alt+F13|press|Mic mute|Strip[0].B2=!|
+macro=F14|hold|Gain up|Strip[0].Gain+=1.5|Strip[0].Gain-=1.5
 ```
 
 Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
@@ -155,6 +160,9 @@ Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 `minimal`/`nobg` → mini); unknown falls back to `dot`.
 `menu_style` accepts `glass` / `native` (aliases: `acrylic`/`blur`/`modern`
 → glass, `classic`/`win32`/`system` → native); unknown falls back to `glass`.
+`overlay_visible` (`true`/`false`, alias `show_overlay`) hides the window
+without stopping hotkeys. `macro=` rows are repeatable and documented in
+[Macro buttons](#macro-buttons).
 
 ## Visual styles (all small, same square hitbox)
 
@@ -264,9 +272,13 @@ Voicemeeter's own macro button is optional. Settings → **Hotkey → Trigger be
 Details:
 
 - Settings → **Hotkey → Capture key** → press a keyboard key or mouse button
-  anywhere (Left/Right/Middle/X1/X2 side buttons). Modifier-only presses
-  (Shift/Ctrl/Alt/Win) are ignored, so Ctrl+A binds A. Esc cancels, the
-  capture also times out after 15 s, and Esc or any tray click cancels it.
+  anywhere (Left/Right/Middle/X1/X2 side buttons). Modifier combos work:
+  hold Ctrl/Alt/Shift/Win while pressing the key, and the captured bind is
+  e.g. `Ctrl+Alt+F13`. Modifier-only presses are not bindable, so Ctrl+A
+  binds Ctrl+A (not just A). Esc cancels, the capture also times out after
+  15 s, and Esc or any tray click cancels it.
+- Modifier matching is **exact**: a bare `F13` macro does not fire while
+  Ctrl is held, so the same key can host both `F13` and `Ctrl+F13`.
 - The event is always **passed through**: the key keeps working normally in
   games/apps AND drives the mic.
 - Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
@@ -288,6 +300,41 @@ Details:
   pattern as Discord push-to-talk) — no injection, no game memory access,
   no admin needed. Hooks are installed only while a bind exists or capture
   is active; if installation fails, the feature silently stays inactive.
+
+## Macro buttons
+
+Settings → **Macros** turns OnAir into a lightweight Voicemeeter MacroButtons
+replacement. Add any number of macros, capture a global key for each, and give
+it a Voicemeeter script. The overlay installs the same low-level hooks as the
+main hotkey; there is no practical limit on the number of macros.
+
+Each macro row is stored as one `macro=` line:
+
+```
+macro=<trigger>|<mode>|<label>|<press>|<release>
+```
+
+- **trigger** – any key or mouse button, optionally with modifiers, e.g.
+  `F13`, `Ctrl+F13`, `Shift+Mouse X1`.
+- **mode** – `press` runs the press script once; `hold` runs it on key-down
+  and restores on release; `both` keeps a short tap and restores after a long
+  hold (`hold_tap_ms`, same threshold as the main hotkey).
+- **label** – shown in the macro dropdown.
+- **press / release** – Voicemeeter requests separated by `;` or newlines:
+  - `Strip[0].B2=1` sets a value.
+  - `Strip[0].B2=!` toggles a 0/1 parameter.
+  - `Strip[0].Gain+=1.5` / `Strip[0].Gain-=0.5` adjust a numeric value.
+- With an empty release script, Hold/Both restore the parameter values read on
+  key-down, so a PTT-style gain or mute works without writing a release line.
+
+Two macros cannot share the same trigger (including the same base key with a
+different modifier set). Capturing is handled by the overlay; Settings asks it
+to listen and polls the `macro_capture` hand-off key. Macro rows are validated
+before saving and the overlay reloads immediately.
+
+The overlay's **Show overlay** switch (Settings → General, or the tray menu)
+hides the indicator without stopping OnAir. Hotkeys, macros and the tray icon
+keep working while it is hidden.
 
 ## Safety / non-goals
 

@@ -12,11 +12,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use onair_config::{
-    compose_vm_param, looks_like_vm_param, parse_hex6, parse_menu_style, parse_strip_button,
-    parse_toggle_key, parse_trigger_mode, parse_visual_style, parse_vm_mode, toggle_key_name,
-    update_config_file, AppConfig, ConfigKey, ToggleKey,
+    compose_vm_param, looks_like_vm_param, parse_hex6, parse_macro_mode, parse_macro_script,
+    parse_menu_style, parse_strip_button, parse_trigger, parse_trigger_mode, parse_visual_style,
+    parse_vm_mode, update_config_file, AppConfig, ConfigKey, Macro, MacroMode, Trigger,
 };
-use slint::{ComponentHandle, SharedString};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
@@ -32,17 +32,42 @@ const MUTEX_NAME: &str = "Local\\OnAirSettings";
 const WINDOW_TITLE: &str = "OnAir Settings";
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Which trigger a capture is filling in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureTarget {
+    Toggle,
+    Macro(usize),
+}
+
+impl CaptureTarget {
+    /// Payload understood by the overlay: 0 = hotkey, 1 + i = macro i.
+    fn payload(self) -> usize {
+        match self {
+            CaptureTarget::Toggle => 0,
+            CaptureTarget::Macro(index) => index + 1,
+        }
+    }
+}
+
 /// Edits that have not been written yet. `update_config_file` re-reads the
 /// file inside the write, so overlay-owned x/y/locked values, comments and
 /// unknown keys are never clobbered by the settings window.
 struct Pending {
     edits: HashMap<ConfigKey, String>,
     capture_started: Option<Instant>,
-    capture_baseline: ToggleKey,
+    capture_target: Option<CaptureTarget>,
+    capture_baseline: Trigger,
+    capture_handoff: String,
     capture_mtime: Option<std::time::SystemTime>,
     capture_writes: u64,
     local_writes: u64,
     synced_mtime: Option<std::time::SystemTime>,
+    /// Macro drafts; written only on an explicit save or delete.
+    macros: Vec<Macro>,
+    macro_selected: usize,
+    /// True while the draft list differs from disk. Blocks the config-file
+    /// watcher from replacing unsaved edits.
+    macros_dirty: bool,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -105,16 +130,29 @@ fn show_toast(ui: &AppWindow, message: impl Into<SharedString>, error: bool) {
     ui.set_toast_error(error);
 }
 
-/// Read the capture-relevant state straight from disk. `None` means the file
-/// could not be read, so a transient error must never look like a capture.
-fn read_capture_state() -> Option<(ToggleKey, Option<std::time::SystemTime>)> {
+/// Read the trigger a capture is filling in straight from disk. `None` means
+/// the file could not be read, so a transient error must never look like a
+/// capture. The second value is the overlay's `macro_capture` hand-off.
+fn read_capture_state(
+    target: CaptureTarget,
+) -> Option<(Trigger, String, Option<std::time::SystemTime>)> {
     let path = AppConfig::config_path();
     let text = std::fs::read_to_string(&path).ok()?;
-    let key = AppConfig::parse(&text).toggle_key;
+    let cfg = AppConfig::parse(&text);
+    let (trigger, handoff) = match target {
+        CaptureTarget::Toggle => (cfg.toggle_trigger(), String::new()),
+        CaptureTarget::Macro(index) => (
+            cfg.macros
+                .get(index)
+                .map(|m| m.trigger)
+                .unwrap_or(Trigger::NONE),
+            cfg.macro_capture.clone(),
+        ),
+    };
     let mtime = std::fs::metadata(&path)
         .and_then(|meta| meta.modified())
         .ok();
-    Some((key, mtime))
+    Some((trigger, handoff, mtime))
 }
 
 /// Modification time of the config file, used to notice writes made by the
@@ -132,6 +170,124 @@ fn vm_fields(param: &str, fallback_button: &str) -> (i32, SharedString, bool) {
     }
 }
 
+/// Human label for a macro slot, used by the selector dropdown.
+fn macro_display_name(mac: &Macro, index: usize) -> String {
+    let label = mac.label.trim();
+    if label.is_empty() {
+        format!("Macro {}", index + 1)
+    } else {
+        label.to_string()
+    }
+}
+
+fn push_macro_list(ui: &AppWindow, state: &Rc<RefCell<Pending>>) {
+    let state = state.borrow();
+    let names: Vec<SharedString> = state
+        .macros
+        .iter()
+        .enumerate()
+        .map(|(i, mac)| macro_display_name(mac, i).into())
+        .collect();
+    ui.set_macro_names(ModelRc::new(VecModel::from(names)));
+    let selected = if state.macros.is_empty() {
+        -1
+    } else {
+        state.macro_selected.min(state.macros.len() - 1) as i32
+    };
+    ui.set_macro_selected(selected);
+}
+
+fn push_macro_fields(ui: &AppWindow, state: &Rc<RefCell<Pending>>) {
+    let state = state.borrow();
+    let Some(mac) = state.macros.get(state.macro_selected) else {
+        ui.set_macro_editing(false);
+        return;
+    };
+    ui.set_macro_editing(true);
+    ui.set_macro_label(mac.label.as_str().into());
+    ui.set_macro_trigger(mac.trigger.name().into());
+    ui.set_macro_trigger_set(!mac.trigger.is_none());
+    ui.set_macro_mode_index(match mac.mode {
+        MacroMode::Press => 0,
+        MacroMode::Hold => 1,
+        MacroMode::Both => 2,
+    });
+    ui.set_macro_press(mac.press.as_str().into());
+    ui.set_macro_release(mac.release.as_str().into());
+}
+
+/// Validate every draft. Returns the first problem in user-facing form.
+fn validate_macros(macros: &[Macro]) -> Result<(), String> {
+    let toggle = AppConfig::load().toggle_trigger();
+    let mut seen: Vec<Trigger> = Vec::new();
+    for (index, mac) in macros.iter().enumerate() {
+        let name = macro_display_name(mac, index);
+        if mac.trigger.is_none() {
+            return Err(format!("{name} has no key yet. Use Capture."));
+        }
+        if !toggle.is_none() && mac.trigger == toggle {
+            return Err(format!("{name} uses the same key as the overlay hotkey."));
+        }
+        if seen.contains(&mac.trigger) {
+            return Err(format!("{name} uses a key that is already bound."));
+        }
+        seen.push(mac.trigger);
+        if mac.press.trim().is_empty() {
+            return Err(format!("{name} has no press script."));
+        }
+        parse_macro_script(&mac.press).map_err(|err| format!("{name}: {err}"))?;
+        if !mac.release.trim().is_empty() {
+            parse_macro_script(&mac.release).map_err(|err| format!("{name} release: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write the draft list to config.ini and ask the overlay to reload.
+fn write_macros_now(ui: &AppWindow, state: &Rc<RefCell<Pending>>, announce: bool) -> bool {
+    let macros = state.borrow().macros.clone();
+    if let Err(message) = validate_macros(&macros) {
+        show_toast(ui, message, true);
+        return false;
+    }
+    match AppConfig::write_macros(&macros) {
+        Ok(()) => {
+            {
+                let mut state = state.borrow_mut();
+                state.local_writes = state.local_writes.saturating_add(1);
+                state.synced_mtime = config_mtime();
+                state.macros_dirty = false;
+            }
+            let running = ipc::notify_reload();
+            ui.set_overlay_running(running);
+            if announce {
+                show_toast(ui, "Macros saved", false);
+            }
+            true
+        }
+        Err(err) => {
+            show_toast(ui, format!("Could not save macros: {err}"), true);
+            false
+        }
+    }
+}
+
+/// Copy the macro list from disk into the draft state.
+fn sync_macros(ui: &AppWindow, state: &Rc<RefCell<Pending>>, cfg: &AppConfig) {
+    {
+        let mut state = state.borrow_mut();
+        state.macros = cfg.macros.clone();
+        state.macros_dirty = false;
+        if state.macros.is_empty() {
+            state.macro_selected = 0;
+        } else if state.macro_selected >= state.macros.len() {
+            state.macro_selected = state.macros.len() - 1;
+        }
+    }
+    push_macro_list(ui, state);
+    push_macro_fields(ui, state);
+}
+
 /// Copy the loaded config into the Slint properties. Position is intentionally
 /// not shown: settings never edits x/y, the overlay owns them.
 fn push_config(ui: &AppWindow, cfg: &AppConfig) {
@@ -139,6 +295,7 @@ fn push_config(ui: &AppWindow, cfg: &AppConfig) {
     ui.set_opacity_value(cfg.opacity as i32);
     ui.set_locked(cfg.locked);
     ui.set_stay_on_top(cfg.always_on_top);
+    ui.set_overlay_visible(cfg.overlay_visible);
     ui.set_menu_style(cfg.menu_style.as_str().into());
 
     ui.set_visual_style(cfg.visual_style.as_str().into());
@@ -172,7 +329,7 @@ fn push_config(ui: &AppWindow, cfg: &AppConfig) {
     ui.set_poll_ms(cfg.poll_ms as i32);
     ui.set_invert(cfg.invert);
 
-    ui.set_toggle_key(toggle_key_name(cfg.toggle_key).into());
+    ui.set_toggle_key(cfg.toggle_trigger().name().into());
     ui.set_toggle_key_set(!cfg.toggle_key.is_none());
     ui.set_trigger_mode(cfg.trigger_mode.as_str().into());
     ui.set_hold_ms(cfg.hold_tap_ms as i32);
@@ -222,6 +379,11 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
         ConfigKey::AlwaysOnTop => {
             let on = parse_bool(value).ok_or("Always on top must be true or false.")?;
             ui.set_stay_on_top(on);
+            Ok(on.to_string())
+        }
+        ConfigKey::OverlayVisible => {
+            let on = parse_bool(value).ok_or("Show overlay must be true or false.")?;
+            ui.set_overlay_visible(on);
             Ok(on.to_string())
         }
         ConfigKey::VmMode => {
@@ -286,10 +448,10 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
             Ok(n.to_string())
         }
         ConfigKey::ToggleKey => {
-            let key = parse_toggle_key(value);
-            ui.set_toggle_key(toggle_key_name(key).into());
-            ui.set_toggle_key_set(!key.is_none());
-            Ok(toggle_key_name(key))
+            let trigger = parse_trigger(value);
+            ui.set_toggle_key(trigger.name().into());
+            ui.set_toggle_key_set(!trigger.is_none());
+            Ok(trigger.name())
         }
         ConfigKey::TriggerMode => {
             let mode = parse_trigger_mode(value);
@@ -324,6 +486,8 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
         ConfigKey::ColorOff => normalize_color(ui, value, ColorField::Off),
         ConfigKey::ColorUnknown => normalize_color(ui, value, ColorField::Unknown),
         ConfigKey::ColorBg => normalize_color(ui, value, ColorField::Background),
+        // Internal hand-off written by the overlay; never edited here.
+        ConfigKey::MacroCapture => Err("Internal capture key.".into()),
     }
 }
 
@@ -472,13 +636,76 @@ fn finish_capture(
 ) {
     let mut state = pending.borrow_mut();
     state.capture_started = None;
+    state.capture_target = None;
     state.capture_mtime = None;
     drop(state);
     ui.set_capture_active(false);
+    ui.set_capture_macro_index(-1);
     ui.set_capture_message(message.into());
     if error {
         show_toast(ui, "Capture did not complete.", true);
     }
+}
+
+/// Ask the running overlay to capture a trigger for `target`. Shared by the
+/// hotkey page and the macro editor.
+fn start_capture(ui: &AppWindow, state: &Rc<RefCell<Pending>>, target: CaptureTarget) {
+    if !ipc::overlay_running() {
+        ui.set_overlay_running(false);
+        ui.set_capture_message("OnAir is not running. Start it, then try again.".into());
+        show_toast(ui, "Start OnAir before capturing a key.", true);
+        return;
+    }
+    if let CaptureTarget::Macro(_) = target {
+        // Drop any stale hand-off left by an interrupted capture. Otherwise
+        // capturing the same key twice would not change the value and would
+        // look like a timeout.
+        if update_config_file(
+            &AppConfig::config_path(),
+            &[(ConfigKey::MacroCapture, String::new())],
+        )
+        .is_ok()
+        {
+            let mut state = state.borrow_mut();
+            state.local_writes = state.local_writes.saturating_add(1);
+        }
+    }
+    // Read the baseline *before* asking the overlay to capture: a very
+    // fast capture must not land between the request and our read.
+    let (baseline, handoff, baseline_mtime) = read_capture_state(target).unwrap_or_else(|| {
+        let cfg = AppConfig::load();
+        let trigger = match target {
+            CaptureTarget::Toggle => cfg.toggle_trigger(),
+            CaptureTarget::Macro(index) => cfg
+                .macros
+                .get(index)
+                .map(|m| m.trigger)
+                .unwrap_or(Trigger::NONE),
+        };
+        (trigger, cfg.macro_capture.clone(), None)
+    });
+    if !ipc::notify_begin_capture(target.payload()) {
+        ui.set_capture_message("Could not ask OnAir to capture a key.".into());
+        show_toast(ui, "Could not start capture.", true);
+        return;
+    }
+    {
+        let mut state = state.borrow_mut();
+        state.capture_started = Some(Instant::now());
+        state.capture_target = Some(target);
+        state.capture_baseline = baseline;
+        state.capture_handoff = handoff;
+        state.capture_mtime = baseline_mtime;
+        state.capture_writes = state.local_writes;
+    }
+    ui.set_capture_active(true);
+    ui.set_capture_macro_index(match target {
+        CaptureTarget::Macro(index) => index as i32,
+        CaptureTarget::Toggle => -1,
+    });
+    ui.set_capture_message("".into());
+    ui.set_capture_remaining(15);
+    show_toast(ui, "Waiting for a key or mouse button...", false);
 }
 
 /// Returns true when the shell accepted the operation. `ShellExecuteW`
@@ -519,12 +746,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let state = Rc::new(RefCell::new(Pending {
         edits: HashMap::new(),
         capture_started: None,
-        capture_baseline: cfg.toggle_key,
+        capture_target: None,
+        capture_baseline: cfg.toggle_trigger(),
+        capture_handoff: String::new(),
         capture_mtime: None,
         capture_writes: 0,
         local_writes: 0,
         synced_mtime: config_mtime(),
+        macros: cfg.macros.clone(),
+        macro_selected: 0,
+        macros_dirty: false,
     }));
+    sync_macros(&ui, &state, &cfg);
     let picker = Rc::new(RefCell::new(None::<picker::PickerState>));
 
     {
@@ -754,31 +987,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // Flush queued edits first so their write cannot be mistaken for a
             // completed capture, and so the baseline reflects what is on disk.
             flush_pending(&ui, &state);
-            if !ipc::overlay_running() {
-                ui.set_overlay_running(false);
-                ui.set_capture_message("OnAir is not running. Start it, then try again.".into());
-                show_toast(&ui, "Start OnAir before capturing a key.", true);
-                return;
-            }
-            // Read the baseline *before* asking the overlay to capture: a very
-            // fast capture must not land between the request and our read.
-            let (baseline, baseline_mtime) =
-                read_capture_state().unwrap_or_else(|| (AppConfig::load().toggle_key, None));
-            if !ipc::notify_begin_capture() {
-                ui.set_capture_message("Could not ask OnAir to capture a key.".into());
-                show_toast(&ui, "Could not start capture.", true);
-                return;
-            }
-            let mut state = state.borrow_mut();
-            state.capture_started = Some(Instant::now());
-            state.capture_baseline = baseline;
-            state.capture_mtime = baseline_mtime;
-            state.capture_writes = state.local_writes;
-            drop(state);
-            ui.set_capture_active(true);
-            ui.set_capture_message("".into());
-            ui.set_capture_remaining(15);
-            show_toast(&ui, "Waiting for a key or mouse button...", false);
+            start_capture(&ui, &state, CaptureTarget::Toggle);
         });
     }
 
@@ -789,6 +998,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else { return };
             let mut guard = state.borrow_mut();
             guard.capture_started = None;
+            guard.capture_target = None;
             guard.capture_mtime = None;
             guard.edits.remove(&ConfigKey::ToggleKey);
             drop(guard);
@@ -799,6 +1009,136 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_toggle_key("None".into());
             ui.set_toggle_key_set(false);
             write_edits(&ui, &state, &[(ConfigKey::ToggleKey, "None".into())], true);
+        });
+    }
+
+    // ---- Macro editor -----------------------------------------------------
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_select(move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut state = state.borrow_mut();
+                if index < 0 || index as usize >= state.macros.len() {
+                    return;
+                }
+                state.macro_selected = index as usize;
+            }
+            push_macro_fields(&ui, &state);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_add(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut state = state.borrow_mut();
+                let index = state.macros.len();
+                state.macros.push(Macro {
+                    trigger: Trigger::NONE,
+                    mode: MacroMode::Press,
+                    label: format!("Macro {}", index + 1),
+                    press: String::new(),
+                    release: String::new(),
+                });
+                state.macro_selected = index;
+                state.macros_dirty = true;
+            }
+            push_macro_list(&ui, &state);
+            push_macro_fields(&ui, &state);
+            show_toast(&ui, "Macro added. Capture a key, then save.", false);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_delete(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut state = state.borrow_mut();
+                if state.macros.is_empty() {
+                    return;
+                }
+                let index = state.macro_selected.min(state.macros.len() - 1);
+                state.macros.remove(index);
+                if state.macro_selected >= state.macros.len() && state.macro_selected > 0 {
+                    state.macro_selected -= 1;
+                }
+                state.macros_dirty = true;
+            }
+            push_macro_list(&ui, &state);
+            push_macro_fields(&ui, &state);
+            // Deleting is an explicit action: persist it when the rest is
+            // valid. Otherwise the draft stays until the next save.
+            if validate_macros(&state.borrow().macros).is_ok() {
+                write_macros_now(&ui, &state, false);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_field(move |field, value| {
+            let is_label = field.as_str() == "label";
+            {
+                let mut state = state.borrow_mut();
+                let index = state.macro_selected;
+                let Some(mac) = state.macros.get_mut(index) else {
+                    return;
+                };
+                match field.as_str() {
+                    "label" => mac.label = value.to_string(),
+                    "press" => mac.press = value.to_string(),
+                    "release" => mac.release = value.to_string(),
+                    "mode" => mac.mode = parse_macro_mode(value.as_str()),
+                    _ => {}
+                }
+                state.macros_dirty = true;
+            }
+            if is_label {
+                if let Some(ui) = weak.upgrade() {
+                    push_macro_list(&ui, &state);
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_save(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if write_macros_now(&ui, &state, true) {
+                push_macro_list(&ui, &state);
+                push_macro_fields(&ui, &state);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_capture(move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            if index < 0 {
+                return;
+            }
+            let index = index as usize;
+            if index >= state.borrow().macros.len() {
+                return;
+            }
+            {
+                let mut state = state.borrow_mut();
+                state.macro_selected = index;
+            }
+            push_macro_list(&ui, &state);
+            push_macro_fields(&ui, &state);
+            start_capture(&ui, &state, CaptureTarget::Macro(index));
         });
     }
 
@@ -826,18 +1166,35 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(mtime) = config_mtime() {
                     if sync.1 != Some(mtime) {
                         let cfg = AppConfig::load();
+                        let macros_dirty = state.borrow().macros_dirty;
                         push_config(&ui, &cfg);
+                        // Never replace unsaved macro drafts when another
+                        // window (or the tray) touches the file.
+                        if !macros_dirty {
+                            sync_macros(&ui, &state, &cfg);
+                        }
                         state.borrow_mut().synced_mtime = Some(mtime);
                     }
                 }
             }
 
-            let (active, started, baseline, baseline_mtime, baseline_writes, local_writes) = {
+            let (
+                active,
+                started,
+                target,
+                baseline,
+                baseline_handoff,
+                baseline_mtime,
+                baseline_writes,
+                local_writes,
+            ) = {
                 let state = state.borrow();
                 (
                     state.capture_started.is_some(),
                     state.capture_started.unwrap_or_else(Instant::now),
+                    state.capture_target,
                     state.capture_baseline,
+                    state.capture_handoff.clone(),
                     state.capture_mtime,
                     state.capture_writes,
                     state.local_writes,
@@ -846,6 +1203,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if !active {
                 return;
             }
+            let Some(target) = target else { return };
             if !running {
                 finish_capture(&ui, &state, "OnAir closed before a key was captured.", true);
                 return;
@@ -859,7 +1217,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // The overlay persists the new bind on capture. Detect completion
             // by value *or* file mtime: pressing the same bind again rewrites
             // the file without changing the value.
-            let Some((captured, captured_mtime)) = read_capture_state() else {
+            let Some((captured, handoff, captured_mtime)) = read_capture_state(target) else {
                 return;
             };
             let value_changed = captured != baseline;
@@ -868,18 +1226,70 @@ fn main() -> Result<(), slint::PlatformError> {
             let file_changed = baseline_mtime.is_some()
                 && local_writes == baseline_writes
                 && captured_mtime != baseline_mtime;
-            if value_changed || file_changed {
-                let name = toggle_key_name(captured);
-                ui.set_toggle_key(name.clone().into());
-                ui.set_toggle_key_set(!captured.is_none());
-                {
-                    let mut state = state.borrow_mut();
-                    state.capture_started = None;
-                    state.capture_mtime = None;
+            let done = match target {
+                CaptureTarget::Toggle => value_changed || file_changed,
+                // Macro captures arrive through the overlay's hand-off key.
+                CaptureTarget::Macro(index) => {
+                    handoff != baseline_handoff && handoff.starts_with(&format!("{index}|"))
                 }
-                ui.set_capture_active(false);
-                ui.set_capture_message(format!("Captured: {name}").into());
-                show_toast(&ui, format!("Hotkey set to {name}"), false);
+            };
+            if !done {
+                return;
+            }
+            match target {
+                CaptureTarget::Toggle => {
+                    let name = captured.name();
+                    ui.set_toggle_key(name.clone().into());
+                    ui.set_toggle_key_set(!captured.is_none());
+                    {
+                        let mut state = state.borrow_mut();
+                        state.capture_started = None;
+                        state.capture_target = None;
+                        state.capture_mtime = None;
+                    }
+                    ui.set_capture_active(false);
+                    ui.set_capture_macro_index(-1);
+                    ui.set_capture_message(format!("Captured: {name}").into());
+                    show_toast(&ui, format!("Hotkey set to {name}"), false);
+                }
+                CaptureTarget::Macro(index) => {
+                    let trigger = handoff
+                        .split_once('|')
+                        .map(|(_, name)| parse_trigger(name))
+                        .unwrap_or(Trigger::NONE);
+                    if trigger.is_none() {
+                        return;
+                    }
+                    {
+                        let mut state = state.borrow_mut();
+                        if let Some(mac) = state.macros.get_mut(index) {
+                            mac.trigger = trigger;
+                        }
+                        state.capture_started = None;
+                        state.capture_target = None;
+                        state.capture_mtime = None;
+                    }
+                    ui.set_capture_active(false);
+                    ui.set_capture_macro_index(-1);
+                    ui.set_capture_message(format!("Captured: {}", trigger.name()).into());
+                    push_macro_list(&ui, &state);
+                    push_macro_fields(&ui, &state);
+                    if write_macros_now(&ui, &state, false) {
+                        // Consume the hand-off so the next capture starts clean.
+                        let _ = update_config_file(
+                            &AppConfig::config_path(),
+                            &[(ConfigKey::MacroCapture, String::new())],
+                        );
+                        {
+                            let mut state = state.borrow_mut();
+                            state.local_writes = state.local_writes.saturating_add(1);
+                            state.synced_mtime = config_mtime();
+                        }
+                        let running = ipc::notify_reload();
+                        ui.set_overlay_running(running);
+                        show_toast(&ui, format!("Macro key set to {}", trigger.name()), false);
+                    }
+                }
             }
         });
     }

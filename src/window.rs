@@ -7,9 +7,12 @@ pub const MUTEX_NAME: &str = "Local\\OnAirOverlay";
 pub const RELOAD_CONFIG_MSG: &str = "OnAir.ReloadConfig";
 pub const BEGIN_CAPTURE_MSG: &str = "OnAir.BeginCapture";
 pub const WM_TRAY: u32 = 1024 + 1; // WM_APP + 1
+/// wparam = kind | modifiers << 8, lparam = key code.
 pub const WM_KEY_CAPTURED: u32 = 1024 + 3; // WM_APP + 3, capture result
-pub const WM_KEY_DOWN: u32 = 1024 + 4; // WM_APP + 4, bind pressed (wparam=kind, lparam=code)
-pub const WM_KEY_UP: u32 = 1024 + 5; // WM_APP + 5, bind released (wparam=kind, lparam=code)
+/// wparam = action id (0 = overlay hotkey, 1 + i = macro i).
+pub const WM_KEY_DOWN: u32 = 1024 + 4; // WM_APP + 4, trigger pressed
+/// wparam = action id, as above.
+pub const WM_KEY_UP: u32 = 1024 + 5; // WM_APP + 5, trigger released
 pub const TIMER_POLL: usize = 1;
 
 pub fn to_wide(s: &str) -> Vec<u16> {

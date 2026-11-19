@@ -1,0 +1,228 @@
+import { Theme } from "theme.slint";
+import { Button, Card, Dropdown, RowSegmented, TextField } from "components.slint";
+
+export component MacrosPage inherits Rectangle {
+    in property <[string]> macro-names: [];
+    in-out property <int> macro-selected: -1;
+    in property <bool> macro-editing: false;
+    in-out property <string> macro-label: "";
+    in property <string> macro-trigger: "None";
+    in property <bool> macro-trigger-set: false;
+    in-out property <int> macro-mode-index: 0;
+    in-out property <string> macro-press: "";
+    in-out property <string> macro-release: "";
+    in property <bool> capture-active: false;
+    in property <int> capture-index: -1;
+    in property <string> capture-message: "";
+    in property <int> capture-remaining: 15;
+    in property <bool> overlay-running: false;
+
+    callback add;
+    callback delete;
+    callback save;
+    callback capture;
+    callback select(int);
+    callback field(string, string);
+
+    width: 100%;
+    height: content.preferred-height + 4px;
+    preferred-height: content.preferred-height + 4px;
+
+    property <bool> capturing: root.capture-active && root.capture-index == root.macro-selected;
+
+    content := VerticalLayout {
+        width: 100%;
+        spacing: 16px;
+
+        Card {
+            title: "Macro buttons";
+            subtitle: "Every macro has its own global key and runs Voicemeeter requests, like Voicemeeter MacroButtons.";
+
+            HorizontalLayout {
+                spacing: 10px;
+                cross-axis-alignment: center;
+
+                Dropdown {
+                    options: root.macro-names;
+                    current-index: root.macro-selected;
+                    enabled: root.macro-names.length > 0;
+                    horizontal-stretch: 1;
+                    selected(i) => { root.select(i); }
+                }
+                Button {
+                    text: "Add";
+                    kind: "secondary";
+                    clicked => { root.add(); }
+                }
+                Button {
+                    text: "Delete";
+                    kind: "ghost";
+                    enabled: root.macro-editing && !root.capture-active;
+                    clicked => { root.delete(); }
+                }
+            }
+        }
+
+        if root.macro-editing: Card {
+            title: root.macro-label == "" ? "Macro" : root.macro-label;
+            subtitle: "Press runs the script on key-down. Hold restores on release. Both taps to keep and holds to restore.";
+
+            Rectangle {
+                height: 66px;
+                border-radius: Theme.radius-md;
+                background: root.capturing ? Theme.accent-soft : Theme.input-bg;
+                border-width: 1px;
+                border-color: root.capturing ? Theme.accent : Theme.border;
+
+                HorizontalLayout {
+                    padding: 14px;
+                    spacing: 12px;
+                    cross-axis-alignment: center;
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: root.capturing ? "CAPTURING" : "KEY";
+                            color: root.capturing ? Theme.accent : Theme.text-muted;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+                        Text {
+                            text: root.macro-trigger;
+                            color: Theme.text;
+                            font-size: 20px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                    }
+
+                    Button {
+                        text: root.capturing ? "Waiting..." : "Capture key";
+                        kind: "primary";
+                        enabled: root.overlay-running && !root.capture-active;
+                        clicked => { root.capture(); }
+                    }
+                }
+            }
+
+            if root.capturing: Text {
+                text: "Listening… press any key or mouse button. \{root.capture-remaining}s remaining. Esc in the overlay cancels.";
+                color: Theme.accent;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            if !root.capture-active && root.capture-message != "": Text {
+                text: root.capture-message;
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+
+            TextField {
+                placeholder: "Label (shown in the dropdown)";
+                text <=> root.macro-label;
+                edited(t) => { root.field("label", t); }
+            }
+
+            RowSegmented {
+                title: "Mode";
+                description: "Press fires once. Hold is momentary. Both keeps a tap and restores after a long hold.";
+                options: ["Press", "Hold", "Both"];
+                current-index <=> root.macro-mode-index;
+                changed(i) => {
+                    root.field("mode", i == 1 ? "hold" : (i == 2 ? "both" : "press"));
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Press script";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                TextField {
+                    placeholder: "Strip[0].B2=!; Strip[0].Gain+=1.5";
+                    text <=> root.macro-press;
+                    edited(t) => { root.field("press", t); }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Release script (optional)";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                TextField {
+                    placeholder: "Strip[0].B2=0";
+                    text <=> root.macro-release;
+                    edited(t) => { root.field("release", t); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                cross-axis-alignment: center;
+                Button {
+                    text: "Save macros";
+                    kind: "primary";
+                    enabled: !root.capture-active;
+                    clicked => { root.save(); }
+                }
+                Text {
+                    text: root.overlay-running ? "Overlay connected" : "OnAir is not running";
+                    color: root.overlay-running ? Theme.success : Theme.warning;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if !root.macro-editing: Card {
+            title: "No macros yet";
+            subtitle: "Add a macro, capture a key, then write the requests it should run.";
+
+            Button {
+                text: "Add macro";
+                kind: "primary";
+                clicked => { root.add(); }
+            }
+        }
+
+        Card {
+            title: "Script syntax";
+            subtitle: "Separate requests with ; or a new line. Voicemeeter parameter names look like Strip[0].B2.";
+
+            Text {
+                text: "• Strip[0].B2=1 sets a parameter to a value.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "• Strip[0].B2=! toggles a 0/1 parameter such as Mute or a bus button.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "• Strip[0].Gain+=1.5 and Strip[0].Gain-=0.5 adjust numeric values.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "• Hold and Both restore the previous values on release unless a release script is set.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

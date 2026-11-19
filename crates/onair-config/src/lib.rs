@@ -306,6 +306,327 @@ pub fn parse_toggle_key(raw: &str) -> ToggleKey {
     vk.map(ToggleKey::Key).unwrap_or(ToggleKey::None)
 }
 
+/// Modifier keys that participate in a global trigger. Left/right variants
+/// are collapsed into one flag, matching `normalize_vk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub win: bool,
+}
+
+impl Modifiers {
+    pub fn is_none(self) -> bool {
+        !(self.ctrl || self.alt || self.shift || self.win)
+    }
+}
+
+/// One global trigger: a base key/button plus optional modifiers. Existing
+/// `toggle_key` values parse as a trigger with no modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trigger {
+    pub key: ToggleKey,
+    pub mods: Modifiers,
+}
+
+impl Trigger {
+    pub const NONE: Trigger = Trigger {
+        key: ToggleKey::None,
+        mods: Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+        },
+    };
+
+    pub fn is_none(self) -> bool {
+        self.key.is_none()
+    }
+
+    /// Canonical label: `Ctrl+Alt+Shift+Win+Key`, or `None`.
+    pub fn name(self) -> String {
+        if self.key.is_none() {
+            return "None".to_string();
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(5);
+        if self.mods.ctrl {
+            parts.push("Ctrl".to_string());
+        }
+        if self.mods.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.mods.shift {
+            parts.push("Shift".to_string());
+        }
+        if self.mods.win {
+            parts.push("Win".to_string());
+        }
+        parts.push(toggle_key_name(self.key));
+        parts.join("+")
+    }
+}
+
+fn is_modifier_key(key: ToggleKey) -> bool {
+    match key {
+        ToggleKey::Key(vk) => matches!(
+            normalize_vk(vk),
+            0x10 // Shift
+                | 0x11 // Ctrl
+                | 0x12 // Alt
+                | 0x5B // LWin
+                | 0x5C // RWin
+        ),
+        _ => false,
+    }
+}
+
+/// Parse a trigger such as `F13`, `Ctrl+Alt+F13`, `Shift+Mouse X1`.
+/// Modifiers must come before the base key. A pure modifier is not bindable,
+/// and Esc stays reserved for capture-cancel. Never fails.
+pub fn parse_trigger(raw: &str) -> Trigger {
+    let mut mods = Modifiers::default();
+    let mut rest = raw.trim();
+    while let Some((head, tail)) = rest.split_once('+') {
+        match head.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" => mods.alt = true,
+            "shift" => mods.shift = true,
+            "win" | "windows" | "meta" | "super" => mods.win = true,
+            _ => break,
+        }
+        rest = tail.trim();
+    }
+    let key = parse_toggle_key(rest);
+    if key.is_none() || is_modifier_key(key) {
+        Trigger::NONE
+    } else {
+        Trigger { key, mods }
+    }
+}
+
+/// How a macro reacts to its trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroMode {
+    /// Run the press script once on key-down.
+    Press,
+    /// Run press on key-down and release/restore on key-up.
+    Hold,
+    /// Tap keeps the press result; a long hold restores it.
+    Both,
+}
+
+impl MacroMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MacroMode::Press => "press",
+            MacroMode::Hold => "hold",
+            MacroMode::Both => "both",
+        }
+    }
+}
+
+pub fn parse_macro_mode(raw: &str) -> MacroMode {
+    let norm: String = raw
+        .chars()
+        .filter(|c| *c != ' ' && *c != '_' && *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match norm.as_str() {
+        "HOLD" | "PTT" | "PUSHTOTALK" | "MOMENTARY" => MacroMode::Hold,
+        "BOTH" | "TAPANDHOLD" | "TOGGLEHOLD" => MacroMode::Both,
+        // "PRESS", "TAP", "TRIGGER" and anything unknown.
+        _ => MacroMode::Press,
+    }
+}
+
+/// One user-defined macro button. Scripts are Voicemeeter requests separated
+/// by `;` or newlines; `release` may be empty, in which case Hold/Both restore
+/// the parameter values saved on key-down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Macro {
+    pub trigger: Trigger,
+    pub mode: MacroMode,
+    pub label: String,
+    pub press: String,
+    pub release: String,
+}
+
+/// One-line label: `|` is the row separator, so it becomes a space.
+fn macro_label_field(value: &str) -> String {
+    value.replace(['|', '\r', '\n'], " ").trim().to_string()
+}
+
+/// One-line script: newlines are legal separators in the editor, but a
+/// `macro=` row is a single line, so they become `;`.
+fn macro_script_field(value: &str) -> String {
+    value
+        .replace('\r', "")
+        .replace('\n', ";")
+        .replace('|', " ")
+        .trim()
+        .to_string()
+}
+
+impl Macro {
+    /// Serialize as a `macro=` config line.
+    pub fn encode(&self) -> String {
+        format!(
+            "macro={}|{}|{}|{}|{}",
+            self.trigger.name(),
+            self.mode.as_str(),
+            macro_label_field(&self.label),
+            macro_script_field(&self.press),
+            macro_script_field(&self.release)
+        )
+    }
+
+    /// Parse the value part of a `macro=` line. Returns None for an unusable
+    /// entry (no trigger or no press script).
+    pub fn parse(value: &str) -> Option<Self> {
+        // Accept both the value (`F13|...`) and a full line (`macro=F13|...`)
+        // so callers can round-trip `encode` output directly.
+        let value = value.trim();
+        let value = match value.split_once('=') {
+            Some((name, rest))
+                if matches!(
+                    name.trim().to_ascii_lowercase().as_str(),
+                    "macro" | "macros"
+                ) =>
+            {
+                rest
+            }
+            _ => value,
+        };
+        let parts: Vec<&str> = value.splitn(5, '|').collect();
+        if parts.len() < 4 {
+            return None;
+        }
+        let trigger = parse_trigger(parts[0]);
+        if trigger.is_none() {
+            return None;
+        }
+        let press = parts[3].trim().to_string();
+        if press.is_empty() {
+            return None;
+        }
+        let label = parts[2].trim();
+        Some(Self {
+            trigger,
+            mode: parse_macro_mode(parts[1]),
+            label: if label.is_empty() {
+                "Macro".to_string()
+            } else {
+                label.to_string()
+            },
+            press,
+            release: parts
+                .get(4)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default(),
+        })
+    }
+}
+
+/// A single request inside a macro script.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroOp {
+    Set(f32),
+    Toggle,
+    Add(f32),
+    Sub(f32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroStep {
+    pub param: String,
+    pub op: MacroOp,
+}
+
+/// Voicemeeter numeric parameters: `Strip[0].B2`, `Bus[1].Gain`,
+/// `Command.Restart`, ...
+fn valid_macro_param(param: &str) -> bool {
+    let Some((head, tail)) = param.split_once('.') else {
+        return false;
+    };
+    let (name, index) = match head.split_once('[') {
+        Some((name, rest)) => match rest.strip_suffix(']') {
+            Some(index) => (name, Some(index)),
+            None => return false,
+        },
+        None => (head, None),
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    if let Some(index) = index {
+        if index.is_empty() || !index.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Parse a macro script into ordered requests. Statements are separated by
+/// `;` or newlines. Supported forms:
+///
+/// ```text
+/// Strip[0].B2=1
+/// Strip[0].B2=!
+/// Strip[0].Gain+=1.5
+/// Strip[0].Gain-=0.5
+/// Command.Restart=1
+/// ```
+///
+/// Returns the first error so the settings window can show it.
+pub fn parse_macro_script(script: &str) -> Result<Vec<MacroStep>, String> {
+    let mut steps = Vec::new();
+    for raw in script.split([';', '\n']) {
+        let statement = raw.trim();
+        if statement.is_empty() || statement.starts_with('#') {
+            continue;
+        }
+        let (param, op, value) = if let Some((p, v)) = statement.split_once("+=") {
+            (p, "+", v)
+        } else if let Some((p, v)) = statement.split_once("-=") {
+            (p, "-", v)
+        } else if let Some((p, v)) = statement.split_once('=') {
+            (p, "=", v)
+        } else {
+            return Err(format!("Missing '=' in \"{statement}\""));
+        };
+        let param = param.trim();
+        if !valid_macro_param(param) {
+            return Err(format!("Invalid parameter \"{param}\""));
+        }
+        let value = value.trim();
+        let op = if op == "=" && value == "!" {
+            MacroOp::Toggle
+        } else {
+            let n: f32 = value
+                .parse()
+                .map_err(|_| format!("Invalid value \"{value}\" for {param}"))?;
+            if !n.is_finite() {
+                return Err(format!("Invalid value \"{value}\" for {param}"));
+            }
+            match op {
+                "+" => MacroOp::Add(n),
+                "-" => MacroOp::Sub(n),
+                _ => MacroOp::Set(n),
+            }
+        };
+        steps.push(MacroStep {
+            param: param.to_string(),
+            op,
+        });
+    }
+    if steps.is_empty() {
+        return Err("Macro has no requests".to_string());
+    }
+    Ok(steps)
+}
+
 fn vk_name(vk: u16) -> String {
     let vk = normalize_vk(vk);
     if (0x41..=0x5A).contains(&vk) || (0x30..=0x39).contains(&vk) {
@@ -358,12 +679,19 @@ pub struct AppConfig {
     pub opacity: u32,
     pub locked: bool,
     pub always_on_top: bool,
+    pub overlay_visible: bool,
+    pub macros: Vec<Macro>,
     pub vm_mode: VmMode,
     pub vm_param: String,
     pub vm_param_b: String,
     pub invert: bool,
     pub poll_ms: u32,
     pub toggle_key: ToggleKey,
+    /// Modifiers held together with `toggle_key` for the overlay hotkey.
+    pub toggle_mods: Modifiers,
+    /// Transient hand-off from the overlay: `"{macro index}|{trigger}"` written
+    /// when a macro capture completes. Settings applies it and clears it.
+    pub macro_capture: String,
     pub trigger_mode: TriggerMode,
     pub hold_tap_ms: u32,
     pub visual_style: VisualStyle,
@@ -384,12 +712,16 @@ impl Default for AppConfig {
             opacity: 90,
             locked: false,
             always_on_top: true,
+            overlay_visible: true,
+            macros: Vec::new(),
             vm_mode: VmMode::Toggle,
             vm_param: "Strip[0].B2".to_string(),
             vm_param_b: "Strip[0].B1".to_string(),
             invert: false,
             poll_ms: 100,
             toggle_key: ToggleKey::None,
+            toggle_mods: Modifiers::default(),
+            macro_capture: String::new(),
             trigger_mode: TriggerMode::Toggle,
             hold_tap_ms: 300,
             visual_style: VisualStyle::Dot,
@@ -416,6 +748,22 @@ impl AppConfig {
         if self.vm_param_b.trim().is_empty() {
             self.vm_param_b = "Strip[0].B1".to_string();
         }
+        if self.toggle_key.is_none() {
+            self.toggle_mods = Modifiers::default();
+        }
+        // A trigger can only drive one action: one macro per key and no macro
+        // on the same key as the overlay hotkey. Keep the first entry when the
+        // file contains duplicates and drop unusable rows.
+        let toggle = self.toggle_trigger();
+        let mut seen: Vec<Trigger> = Vec::new();
+        self.macros.retain(|m| {
+            if m.trigger.is_none() || m.trigger == toggle || seen.contains(&m.trigger) {
+                false
+            } else {
+                seen.push(m.trigger);
+                true
+            }
+        });
     }
 
     pub fn config_path() -> PathBuf {
@@ -489,12 +837,17 @@ impl AppConfig {
                 continue;
             };
             let key = k.trim();
-            let val = v.trim();
-            // Inline comments start at `#` or `;` only when preceded by
-            // whitespace, so a value like `#2ECC71` stays intact.
-            let val = match inline_comment_start(val) {
-                Some(index) => val[..index].trim(),
-                None => val,
+            let raw_val = v.trim();
+            // Macro rows hold a script where `;` is a separator, so an inline
+            // comment rule would truncate `A=1 ; B=2`. Every other key keeps
+            // the usual "whitespace then #/;" comment behaviour.
+            let val = if matches!(key, "macro" | "macros") {
+                raw_val
+            } else {
+                match inline_comment_start(raw_val) {
+                    Some(index) => raw_val[..index].trim(),
+                    None => raw_val,
+                }
             };
             match key {
                 "x" => {
@@ -519,6 +872,15 @@ impl AppConfig {
                 }
                 "locked" => cfg.locked = parse_bool(val, cfg.locked),
                 "always_on_top" => cfg.always_on_top = parse_bool(val, cfg.always_on_top),
+                "overlay_visible" | "show_overlay" => {
+                    cfg.overlay_visible = parse_bool(val, cfg.overlay_visible)
+                }
+                "macro" | "macros" => {
+                    if let Some(mac) = Macro::parse(val) {
+                        cfg.macros.push(mac);
+                    }
+                }
+                "macro_capture" => cfg.macro_capture = val.trim().to_string(),
                 "vm_mode" | "action_mode" => cfg.vm_mode = parse_vm_mode(val),
                 "vm_param" => {
                     if !val.is_empty() {
@@ -536,7 +898,11 @@ impl AppConfig {
                         cfg.poll_ms = n;
                     }
                 }
-                "toggle_key" => cfg.toggle_key = parse_toggle_key(val),
+                "toggle_key" => {
+                    let trigger = parse_trigger(val);
+                    cfg.toggle_key = trigger.key;
+                    cfg.toggle_mods = trigger.mods;
+                }
                 "trigger_mode" => cfg.trigger_mode = parse_trigger_mode(val),
                 "hold_tap_ms" | "hold_ms" | "tap_ms" => {
                     if let Ok(n) = val.parse::<u32>() {
@@ -578,6 +944,13 @@ impl AppConfig {
         cfg
     }
 
+    pub fn toggle_trigger(&self) -> Trigger {
+        Trigger {
+            key: self.toggle_key,
+            mods: self.toggle_mods,
+        }
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         self.write_full(&Self::config_path())
     }
@@ -592,7 +965,7 @@ impl AppConfig {
             }
         }
         let _lock = ConfigLock::acquire(path)?;
-        let content = format!(
+        let mut content = format!(
             "# OnAir config (key=value)\n\
              x={}\n\
              y={}\n\
@@ -600,6 +973,7 @@ impl AppConfig {
              opacity={}\n\
              locked={}\n\
              always_on_top={}\n\
+             overlay_visible={}\n\
              vm_mode={}\n\
              vm_param={}\n\
              vm_param_b={}\n\
@@ -621,12 +995,13 @@ impl AppConfig {
             self.opacity,
             self.locked,
             self.always_on_top,
+            self.overlay_visible,
             self.vm_mode.as_str(),
             self.vm_param,
             self.vm_param_b,
             self.invert,
             self.poll_ms,
-            toggle_key_name(self.toggle_key),
+            self.toggle_trigger().name(),
             self.trigger_mode.as_str(),
             self.hold_tap_ms,
             self.visual_style.as_str(),
@@ -645,7 +1020,67 @@ impl AppConfig {
             self.color_bg.1,
             self.color_bg.2,
         );
+        for mac in &self.macros {
+            content.push_str(&mac.encode());
+            content.push('\n');
+        }
         write_atomic(path, content.as_bytes())
+    }
+
+    /// Replace every `macro=` line with `macros`, keeping all other lines
+    /// (comments, ordering, unrelated keys) intact. Macro rows are inherently
+    /// multi-line, so they bypass `apply_edits`.
+    pub fn write_macros(macros: &[Macro]) -> std::io::Result<()> {
+        Self::write_macros_to(&Self::config_path(), macros)
+    }
+
+    pub fn write_macros_to(path: &Path, macros: &[Macro]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let _lock = ConfigLock::acquire(path)?;
+        let existing = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err),
+        };
+        let (bom, body) = match existing.strip_prefix('\u{feff}') {
+            Some(rest) => ("\u{feff}", rest),
+            None => ("", existing.as_str()),
+        };
+        let newline = if body.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut out = String::with_capacity(body.len() + 64);
+        out.push_str(bom);
+        for chunk in body.split_inclusive('\n') {
+            let (line, _ending) = split_line_ending(chunk);
+            let is_macro = line
+                .split_once('=')
+                .map(|(name, _)| {
+                    matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "macro" | "macros"
+                    )
+                })
+                .unwrap_or(false);
+            if is_macro {
+                // Drop the row; the new macro block is appended below.
+                continue;
+            }
+            out.push_str(chunk);
+        }
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push_str(newline);
+        }
+        if !macros.is_empty() && !out.is_empty() {
+            out.push_str(newline);
+        }
+        for mac in macros {
+            out.push_str(&mac.encode());
+            out.push_str(newline);
+        }
+        write_atomic(path, out.as_bytes())
     }
 
     /// Persist only `keys`, leaving every other line (comments, unknown keys,
@@ -670,12 +1105,14 @@ impl AppConfig {
             ConfigKey::Opacity => self.opacity.to_string(),
             ConfigKey::Locked => self.locked.to_string(),
             ConfigKey::AlwaysOnTop => self.always_on_top.to_string(),
+            ConfigKey::OverlayVisible => self.overlay_visible.to_string(),
+            ConfigKey::MacroCapture => self.macro_capture.clone(),
             ConfigKey::VmMode => self.vm_mode.as_str().to_string(),
             ConfigKey::VmParam => self.vm_param.clone(),
             ConfigKey::VmParamB => self.vm_param_b.clone(),
             ConfigKey::Invert => self.invert.to_string(),
             ConfigKey::PollMs => self.poll_ms.to_string(),
-            ConfigKey::ToggleKey => toggle_key_name(self.toggle_key),
+            ConfigKey::ToggleKey => self.toggle_trigger().name(),
             ConfigKey::TriggerMode => self.trigger_mode.as_str().to_string(),
             ConfigKey::HoldTapMs => self.hold_tap_ms.to_string(),
             ConfigKey::VisualStyle => self.visual_style.as_str().to_string(),
@@ -900,6 +1337,8 @@ pub enum ConfigKey {
     Opacity,
     Locked,
     AlwaysOnTop,
+    OverlayVisible,
+    MacroCapture,
     VmMode,
     VmParam,
     VmParamB,
@@ -933,6 +1372,8 @@ impl ConfigKey {
             ConfigKey::Opacity => "opacity",
             ConfigKey::Locked => "locked",
             ConfigKey::AlwaysOnTop => "always_on_top",
+            ConfigKey::OverlayVisible => "overlay_visible",
+            ConfigKey::MacroCapture => "macro_capture",
             ConfigKey::VmMode => "vm_mode",
             ConfigKey::VmParam => "vm_param",
             ConfigKey::VmParamB => "vm_param_b",
@@ -966,13 +1407,15 @@ impl ConfigKey {
 
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
-        const ALL: [ConfigKey; 21] = [
+        const ALL: [ConfigKey; 23] = [
             ConfigKey::X,
             ConfigKey::Y,
             ConfigKey::Size,
             ConfigKey::Opacity,
             ConfigKey::Locked,
             ConfigKey::AlwaysOnTop,
+            ConfigKey::OverlayVisible,
+            ConfigKey::MacroCapture,
             ConfigKey::VmMode,
             ConfigKey::VmParam,
             ConfigKey::VmParamB,
@@ -1613,5 +2056,182 @@ mod tests {
         let cfg = AppConfig::parse("\u{feff}size=96\nvm_param_b=Strip[3].A2\n");
         assert_eq!(cfg.size, 96);
         assert_eq!(cfg.vm_param_b, "Strip[3].A2");
+    }
+
+    #[test]
+    fn trigger_parse_and_name() {
+        assert_eq!(parse_trigger("F13").name(), "F13");
+        assert_eq!(parse_trigger("ctrl+alt+f13").name(), "Ctrl+Alt+F13");
+        assert_eq!(parse_trigger("Shift+Mouse X1").name(), "Shift+Mouse X1");
+        assert_eq!(
+            parse_trigger("Alt+Ctrl+Shift+Win+A").name(),
+            "Ctrl+Alt+Shift+Win+A"
+        );
+        assert_eq!(parse_trigger("Ctrl"), Trigger::NONE);
+        assert_eq!(parse_trigger("Ctrl+Shift"), Trigger::NONE);
+        assert_eq!(parse_trigger("Esc"), Trigger::NONE);
+        assert_eq!(parse_trigger(""), Trigger::NONE);
+        // Round trip through the canonical label.
+        let t = parse_trigger("Ctrl+Win+B");
+        assert_eq!(parse_trigger(&t.name()), t);
+    }
+
+    #[test]
+    fn toggle_trigger_modifiers_roundtrip() {
+        let cfg = AppConfig::parse("toggle_key=Ctrl+Alt+F13\n");
+        assert_eq!(cfg.toggle_key, ToggleKey::Key(0x7C));
+        assert!(cfg.toggle_mods.ctrl && cfg.toggle_mods.alt);
+        assert_eq!(cfg.toggle_trigger().name(), "Ctrl+Alt+F13");
+        assert_eq!(cfg.value_for(ConfigKey::ToggleKey), "Ctrl+Alt+F13");
+
+        let cfg = AppConfig::parse("toggle_key=F13\n");
+        assert!(cfg.toggle_mods.is_none());
+        assert_eq!(cfg.toggle_trigger().name(), "F13");
+    }
+
+    #[test]
+    fn macro_capture_line_roundtrip() {
+        let cfg = AppConfig::parse("macro_capture=1|Ctrl+F13\n");
+        assert_eq!(cfg.macro_capture, "1|Ctrl+F13");
+        assert_eq!(cfg.value_for(ConfigKey::MacroCapture), "1|Ctrl+F13");
+        let text = apply_edits(
+            "macro_capture=1|Ctrl+F13\nsize=48\n",
+            &[(ConfigKey::MacroCapture, String::new())],
+        );
+        assert!(text.contains("macro_capture=\n"));
+        assert!(text.contains("size=48"));
+    }
+
+    #[test]
+    fn macro_mode_parse() {
+        assert_eq!(parse_macro_mode("hold"), MacroMode::Hold);
+        assert_eq!(parse_macro_mode("Push-To-Talk"), MacroMode::Hold);
+        assert_eq!(parse_macro_mode("both"), MacroMode::Both);
+        assert_eq!(parse_macro_mode("press"), MacroMode::Press);
+        assert_eq!(parse_macro_mode("garbage"), MacroMode::Press);
+    }
+
+    #[test]
+    fn macro_encode_parse_roundtrip() {
+        let mac = Macro {
+            trigger: parse_trigger("Ctrl+Alt+F13"),
+            mode: MacroMode::Hold,
+            label: "Mic mute".to_string(),
+            press: "Strip[0].B2=1; Strip[0].Gain+=1.5".to_string(),
+            release: "Strip[0].B2=0".to_string(),
+        };
+        let encoded = mac.encode();
+        assert_eq!(Macro::parse(&encoded), Some(mac));
+        assert_eq!(
+            Macro::parse("F13|press|Label|Strip[0].B2=!|")
+                .unwrap()
+                .release,
+            ""
+        );
+        // Newlines in a script become `;` so the row stays one line and still
+        // parses back into the same steps.
+        let multiline = Macro {
+            trigger: parse_trigger("F14"),
+            mode: MacroMode::Press,
+            label: "Two steps".to_string(),
+            press: "Strip[0].B2=1\r\nStrip[0].Gain+=1.5".to_string(),
+            release: String::new(),
+        };
+        let encoded = multiline.encode();
+        assert!(!encoded.contains('\n'));
+        let parsed = Macro::parse(&encoded).unwrap();
+        assert_eq!(parse_macro_script(&parsed.press).unwrap().len(), 2);
+        // Unusable rows are rejected.
+        assert_eq!(Macro::parse("None|press|x|Strip[0].B2=1|"), None);
+        assert_eq!(Macro::parse("F13|press|x||"), None);
+        assert_eq!(Macro::parse("F13|press|x"), None);
+    }
+
+    #[test]
+    fn macro_script_parse() {
+        let steps =
+            parse_macro_script("Strip[0].B2=1\n# comment\nBus[1].Gain+=1.5; Bus[1].Gain-=0.5")
+                .unwrap();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].param, "Strip[0].B2");
+        assert_eq!(steps[0].op, MacroOp::Set(1.0));
+        assert_eq!(steps[1].op, MacroOp::Add(1.5));
+        assert_eq!(steps[2].op, MacroOp::Sub(0.5));
+        assert_eq!(
+            parse_macro_script("Strip[0].B2=!").unwrap()[0].op,
+            MacroOp::Toggle
+        );
+        assert!(parse_macro_script("").is_err());
+        assert!(parse_macro_script("Strip[0].B2").is_err());
+        assert!(parse_macro_script("Strip[0].B2=abc").is_err());
+        assert!(parse_macro_script("Strip[0].B2=NaN").is_err());
+        assert!(parse_macro_script("Bad Param=1").is_err());
+    }
+
+    #[test]
+    fn macro_rows_keep_semicolon_separated_scripts() {
+        // A space before `;` must not be treated as an inline comment.
+        let cfg = AppConfig::parse("macro=F13|press|Gain|Strip[0].B2=1 ; Strip[0].Gain+=1.5|\n");
+        assert_eq!(cfg.macros.len(), 1);
+        let steps = parse_macro_script(&cfg.macros[0].press).unwrap();
+        assert_eq!(steps.len(), 2);
+        // Other keys still support inline comments.
+        let cfg = AppConfig::parse("size=64 ; note\n");
+        assert_eq!(cfg.size, 64);
+    }
+
+    #[test]
+    fn duplicate_macro_triggers_are_dropped() {
+        let cfg = AppConfig::parse(
+            "macro=F13|press|a|Strip[0].B2=1|\nmacro=F13|press|b|Strip[0].B2=0|\nmacro=Ctrl+F14|hold|c|Strip[0].B1=1|\n",
+        );
+        assert_eq!(cfg.macros.len(), 2);
+        assert_eq!(cfg.macros[0].label, "a");
+        assert_eq!(cfg.macros[1].label, "c");
+
+        // A macro may not reuse the overlay hotkey.
+        let cfg = AppConfig::parse(
+            "toggle_key=F13\nmacro=F13|press|same|Strip[0].B2=1|\nmacro=Ctrl+F13|press|ok|Strip[0].B2=0|\n",
+        );
+        assert_eq!(cfg.macros.len(), 1);
+        assert_eq!(cfg.macros[0].label, "ok");
+    }
+
+    #[test]
+    fn write_macros_replaces_rows_and_keeps_comments() {
+        let dir = std::env::temp_dir().join(format!("onair-macros-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.ini");
+        std::fs::write(
+            &path,
+            "# keep me\r\nmacro=F13|press|old|Strip[0].B2=1|\r\nsize=48\r\n",
+        )
+        .unwrap();
+        let macros = vec![
+            Macro {
+                trigger: parse_trigger("Ctrl+F13"),
+                mode: MacroMode::Press,
+                label: "new".to_string(),
+                press: "Strip[0].B2=1".to_string(),
+                release: String::new(),
+            },
+            Macro {
+                trigger: parse_trigger("Ctrl+F14"),
+                mode: MacroMode::Hold,
+                label: "second".to_string(),
+                press: "Strip[0].B1=1".to_string(),
+                release: String::new(),
+            },
+        ];
+        AppConfig::write_macros_to(&path, &macros).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep me"));
+        assert!(text.contains("size=48"));
+        assert!(!text.contains("|old|"));
+        assert_eq!(text.matches("macro=").count(), 2);
+        assert!(text.contains("\r\n"));
+        let cfg = AppConfig::parse(&text);
+        assert_eq!(cfg.macros, macros);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

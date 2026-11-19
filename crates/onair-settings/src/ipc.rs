@@ -20,15 +20,16 @@ pub fn overlay_running() -> bool {
 }
 
 pub fn notify_reload() -> bool {
-    post_to_overlay(RELOAD_MSG)
+    post_to_overlay(RELOAD_MSG, 0)
 }
 
-#[allow(dead_code)]
-pub fn notify_begin_capture() -> bool {
-    post_to_overlay(BEGIN_CAPTURE_MSG)
+/// Ask the overlay to capture one trigger. `target` is 0 for the overlay
+/// hotkey or `1 + macro index`.
+pub fn notify_begin_capture(target: usize) -> bool {
+    post_to_overlay(BEGIN_CAPTURE_MSG, target)
 }
 
-fn post_to_overlay(name: &str) -> bool {
+fn post_to_overlay(name: &str, payload: usize) -> bool {
     let Some(hwnd) = find_overlay() else {
         return false;
     };
@@ -37,5 +38,5 @@ fn post_to_overlay(name: &str) -> bool {
     if msg == 0 {
         return false;
     }
-    unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)).is_ok() }
+    unsafe { PostMessageW(Some(hwnd), msg, WPARAM(payload), LPARAM(0)).is_ok() }
 }

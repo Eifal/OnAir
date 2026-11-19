@@ -302,6 +302,21 @@ impl VmClient {
         Some(val >= 0.5)
     }
 
+    /// Read any numeric parameter as a raw float. Returns None when the
+    /// DLL/server/parameter is unavailable.
+    pub fn read_raw(&mut self, vm_param: &str) -> Option<f32> {
+        if !self.ensure_login_for_action() {
+            return None;
+        }
+        let f_get = self.f_get?;
+        let mut name = Self::ansi_param(vm_param);
+        let mut val: f32 = 0.0;
+        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+            return None;
+        }
+        Some(val)
+    }
+
     /// Swap two 0/1 parameters based on the primary's current value: when
     /// the primary is ON it becomes OFF and the secondary ON, and vice
     /// versa. This keeps exactly one button ON even when both started in
