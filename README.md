@@ -296,6 +296,10 @@ Details:
 - Coverage is whatever Windows low-level hooks see: keyboard incl. F13–F24,
   plus Mouse Left/Right/Middle/X1/X2. Extra vendor-only gaming buttons are
   invisible to Windows itself and cannot be bound.
+- Numpad keys are captured by their physical key as `Num0`–`Num9`, `Num+`,
+  `Num-`, `Num*`, `Num/`, `Num.` and keep working with NumLock on or off.
+  A dedicated Insert/Delete/Home/arrow key is kept separate from the numpad
+  key that shares its position.
 - Technique: `WH_KEYBOARD_LL` + `WH_MOUSE_LL` on our own UI thread (same
   pattern as Discord push-to-talk) — no injection, no game memory access,
   no admin needed. Hooks are installed only while a bind exists or capture

@@ -169,6 +169,41 @@ fn modifier_flag(vk: u16) -> Option<fn(&mut Modifiers, bool)> {
     }
 }
 
+/// Low-level hooks report the NumLock-off function for numpad keys: Numpad0
+/// arrives as VK_INSERT (scan 0x52), Numpad4 as VK_LEFT, and so on. Map the
+/// physical numpad scancode back to VK_NUMPADx so a captured key is labelled
+/// and matched as the numpad key the user pressed, with NumLock on or off.
+/// Dedicated navigation keys use extended scancodes and keep their own VK.
+fn normalize_numpad(vk: u16, scan: u32, extended: bool) -> u16 {
+    if extended {
+        return vk;
+    }
+    match scan {
+        0x47 => 0x67, // Num7 / Home
+        0x48 => 0x68, // Num8 / Up
+        0x49 => 0x69, // Num9 / PageUp
+        0x4B => 0x64, // Num4 / Left
+        0x4C => 0x65, // Num5 / Clear
+        0x4D => 0x66, // Num6 / Right
+        0x4F => 0x61, // Num1 / End
+        0x50 => 0x62, // Num2 / Down
+        0x51 => 0x63, // Num3 / PageDown
+        0x52 => 0x60, // Num0 / Insert
+        0x53 => 0x6E, // Num. / Delete
+        _ => vk,
+    }
+}
+
+/// Virtual key for a hook event, with left/right modifiers folded and numpad
+/// keys resolved from their scancode.
+fn event_vk(info: &KBDLLHOOKSTRUCT) -> u16 {
+    normalize_numpad(
+        normalize_vk(info.vkCode as u16),
+        info.scanCode,
+        info.flags.contains(LLKHF_EXTENDED),
+    )
+}
+
 pub fn is_capturing() -> bool {
     unsafe { CAPTURING }
 }
@@ -207,7 +242,7 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
         let msg = wparam.0 as u32;
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let vk = normalize_vk(info.vkCode as u16);
+            let vk = event_vk(info);
             if CAPTURING {
                 // Esc cancels capture and is never bindable. Modifiers are
                 // recorded and skipped so Ctrl+A captures Ctrl+A.
@@ -237,7 +272,7 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
             // Key-up is ignored while capturing (capture is down-only).
             if !CAPTURING {
                 let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                let vk = normalize_vk(info.vkCode as u16);
+                let vk = event_vk(info);
                 if let Some(flag) = modifier_flag(vk) {
                     flag(&mut MODS, false);
                 }
@@ -348,6 +383,22 @@ mod tests {
                 "VK {vk:#04X} should be bindable"
             );
         }
+    }
+
+    #[test]
+    fn numpad_scancodes_normalize_across_numlock() {
+        // NumLock off: Numpad0 arrives as VK_INSERT with the numpad scancode.
+        assert_eq!(normalize_numpad(0x2D, 0x52, false), 0x60);
+        assert_eq!(normalize_numpad(0x24, 0x47, false), 0x67);
+        assert_eq!(normalize_numpad(0x25, 0x4B, false), 0x64);
+        assert_eq!(normalize_numpad(0x2E, 0x53, false), 0x6E);
+        // NumLock on still reports VK_NUMPADx; the mapping is stable.
+        assert_eq!(normalize_numpad(0x60, 0x52, false), 0x60);
+        assert_eq!(normalize_numpad(0x65, 0x4C, false), 0x65);
+        // Dedicated keys use extended scancodes and keep their own VK.
+        assert_eq!(normalize_numpad(0x2D, 0x52, true), 0x2D);
+        assert_eq!(normalize_numpad(0x24, 0x47, true), 0x24);
+        assert_eq!(normalize_numpad(0x41, 0x1E, false), 0x41);
     }
 
     #[test]
