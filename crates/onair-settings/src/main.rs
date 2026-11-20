@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use onair_config::{
     compose_vm_param, looks_like_vm_param, parse_hex6, parse_macro_mode, parse_macro_script,
     parse_menu_style, parse_strip_button, parse_trigger, parse_trigger_mode, parse_visual_style,
-    parse_vm_mode, update_config_file, AppConfig, ConfigKey, Macro, MacroMode, Trigger,
+    parse_vm_mode, update_config_file, AppConfig, ConfigKey, Macro, MacroMode, MacroOp, Trigger,
+    VM_BUTTONS,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use windows::core::PCWSTR;
@@ -65,6 +66,11 @@ struct Pending {
     /// Macro drafts; written only on an explicit save or delete.
     macros: Vec<Macro>,
     macro_selected: usize,
+    /// Strip/button/action picker for the simple macro builder. Only the
+    /// selected macro is shown, so a single set of values is enough.
+    macro_strip: u32,
+    macro_button: usize,
+    macro_action: usize,
     /// True while the draft list differs from disk. Blocks the config-file
     /// watcher from replacing unsaved edits.
     macros_dirty: bool,
@@ -197,23 +203,83 @@ fn push_macro_list(ui: &AppWindow, state: &Rc<RefCell<Pending>>) {
     ui.set_macro_selected(selected);
 }
 
-fn push_macro_fields(ui: &AppWindow, state: &Rc<RefCell<Pending>>) {
-    let state = state.borrow();
-    let Some(mac) = state.macros.get(state.macro_selected) else {
-        ui.set_macro_editing(false);
-        return;
+/// Button dropdown index for a Voicemeeter button name.
+fn macro_button_index(button: &str) -> Option<usize> {
+    VM_BUTTONS.iter().position(|b| *b == button)
+}
+
+/// When the press script is exactly the one request the picker writes,
+/// return `(strip, button index, action index)`. Complex scripts return None
+/// so the editor can warn that picking would replace them.
+fn derive_picker(mac: &Macro) -> Option<(u32, usize, usize)> {
+    if mac.press.trim().is_empty() {
+        return None;
+    }
+    let steps = parse_macro_script(&mac.press).ok()?;
+    if steps.len() != 1 {
+        return None;
+    }
+    let (strip, button) = parse_strip_button(&steps[0].param)?;
+    let button = macro_button_index(button)?;
+    let action = match steps[0].op {
+        MacroOp::Toggle => 0,
+        MacroOp::Set(1.0) => 1,
+        MacroOp::Set(0.0) => 2,
+        _ => return None,
     };
-    ui.set_macro_editing(true);
-    ui.set_macro_label(mac.label.as_str().into());
-    ui.set_macro_trigger(mac.trigger.name().into());
-    ui.set_macro_trigger_set(!mac.trigger.is_none());
-    ui.set_macro_mode_index(match mac.mode {
-        MacroMode::Press => 0,
-        MacroMode::Hold => 1,
-        MacroMode::Both => 2,
-    });
-    ui.set_macro_press(mac.press.as_str().into());
-    ui.set_macro_release(mac.release.as_str().into());
+    Some((strip, button, action))
+}
+
+/// Build the simple one-line press script for the picker.
+fn compose_press(strip: u32, button: usize, action: usize) -> Option<String> {
+    let button = VM_BUTTONS.get(button)?;
+    let param = compose_vm_param(strip, button)?;
+    Some(match action {
+        1 => format!("{param}=1"),
+        2 => format!("{param}=0"),
+        _ => format!("{param}=!"),
+    })
+}
+
+fn push_macro_fields(ui: &AppWindow, state: &Rc<RefCell<Pending>>) {
+    let (mac, derived) = {
+        let state = state.borrow();
+        let Some(mac) = state.macros.get(state.macro_selected) else {
+            drop(state);
+            ui.set_macro_editing(false);
+            return;
+        };
+        (mac.clone(), derive_picker(mac))
+    };
+    // Keep the picker state aligned with the selected macro so the next
+    // dropdown change builds on what is actually shown.
+    {
+        let mut state = state.borrow_mut();
+        if let Some((strip, button, action)) = derived {
+            state.macro_strip = strip;
+            state.macro_button = button;
+            state.macro_action = action;
+        }
+        let (strip, button, action) = (state.macro_strip, state.macro_button, state.macro_action);
+        ui.set_macro_editing(true);
+        ui.set_macro_label(mac.label.as_str().into());
+        ui.set_macro_trigger(mac.trigger.name().into());
+        ui.set_macro_trigger_set(!mac.trigger.is_none());
+        ui.set_macro_mode_index(match mac.mode {
+            MacroMode::Press => 0,
+            MacroMode::Hold => 1,
+            MacroMode::Both => 2,
+        });
+        ui.set_macro_press(mac.press.as_str().into());
+        ui.set_macro_release(mac.release.as_str().into());
+        // The picker mirrors a simple script. An empty script keeps the last
+        // picker values so a new macro can be built with three clicks; a
+        // complex script keeps them too but flags itself so the UI can warn.
+        ui.set_macro_simple(derived.is_some() || mac.press.trim().is_empty());
+        ui.set_macro_strip_index(strip as i32 - 1);
+        ui.set_macro_button(button as i32);
+        ui.set_macro_action(action as i32);
+    }
 }
 
 /// Validate every draft. Returns the first problem in user-facing form.
@@ -755,6 +821,9 @@ fn main() -> Result<(), slint::PlatformError> {
         synced_mtime: config_mtime(),
         macros: cfg.macros.clone(),
         macro_selected: 0,
+        macro_strip: 1,
+        macro_button: 6, // B2
+        macro_action: 0, // Toggle
         macros_dirty: false,
     }));
     sync_macros(&ui, &state, &cfg);
@@ -1037,11 +1106,16 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 let mut state = state.borrow_mut();
                 let index = state.macros.len();
+                // Start from the picker values already shown so the macro is
+                // immediately usable after a key is captured.
+                let press =
+                    compose_press(state.macro_strip, state.macro_button, state.macro_action)
+                        .unwrap_or_default();
                 state.macros.push(Macro {
                     trigger: Trigger::NONE,
                     mode: MacroMode::Press,
                     label: format!("Macro {}", index + 1),
-                    press: String::new(),
+                    press,
                     release: String::new(),
                 });
                 state.macro_selected = index;
@@ -1085,6 +1159,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_macro_field(move |field, value| {
             let is_label = field.as_str() == "label";
+            let is_press = field.as_str() == "press";
             {
                 let mut state = state.borrow_mut();
                 let index = state.macro_selected;
@@ -1105,6 +1180,79 @@ fn main() -> Result<(), slint::PlatformError> {
                     push_macro_list(&ui, &state);
                 }
             }
+            if is_press {
+                // Keep the strip/button picker in sync when the user types a
+                // simple request by hand; a complex script disables the
+                // "picker will replace" hint.
+                let derived = {
+                    let state = state.borrow();
+                    state
+                        .macros
+                        .get(state.macro_selected)
+                        .and_then(derive_picker)
+                };
+                if let Some(ui) = weak.upgrade() {
+                    match derived {
+                        Some((strip, button, action)) => {
+                            {
+                                let mut state = state.borrow_mut();
+                                state.macro_strip = strip;
+                                state.macro_button = button;
+                                state.macro_action = action;
+                            }
+                            ui.set_macro_simple(true);
+                            ui.set_macro_strip_index(strip as i32 - 1);
+                            ui.set_macro_button(button as i32);
+                            ui.set_macro_action(action as i32);
+                        }
+                        None => ui.set_macro_simple(value.trim().is_empty()),
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_macro_picker(move |field, value| {
+            let Some(ui) = weak.upgrade() else { return };
+            if value < 0 {
+                return;
+            }
+            let (script, strip, button, action) = {
+                let mut state = state.borrow_mut();
+                let index = state.macro_selected;
+                if index >= state.macros.len() {
+                    return;
+                }
+                match field.as_str() {
+                    "strip" => state.macro_strip = (value as u32 + 1).clamp(1, 8),
+                    "button" => {
+                        state.macro_button = (value as usize).min(VM_BUTTONS.len() - 1);
+                    }
+                    "action" => state.macro_action = (value as usize).min(2),
+                    _ => {}
+                }
+                let Some(script) =
+                    compose_press(state.macro_strip, state.macro_button, state.macro_action)
+                else {
+                    return;
+                };
+                state.macros[index].press = script.clone();
+                state.macros_dirty = true;
+                (
+                    script,
+                    state.macro_strip,
+                    state.macro_button,
+                    state.macro_action,
+                )
+            };
+            ui.set_macro_strip_index(strip as i32 - 1);
+            ui.set_macro_button(button as i32);
+            ui.set_macro_action(action as i32);
+            ui.set_macro_simple(true);
+            ui.set_macro_press(script.into());
         });
     }
 
@@ -1329,4 +1477,45 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     ui.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn macro_with_press(press: &str) -> Macro {
+        Macro {
+            trigger: Trigger::NONE,
+            mode: MacroMode::Press,
+            label: "test".to_string(),
+            press: press.to_string(),
+            release: String::new(),
+        }
+    }
+
+    #[test]
+    fn picker_compose_and_derive_roundtrip() {
+        for action in 0..3 {
+            let script = compose_press(1, 6, action).expect("compose");
+            let mac = macro_with_press(&script);
+            assert_eq!(derive_picker(&mac), Some((1, 6, action)));
+        }
+        assert!(compose_press(1, VM_BUTTONS.len(), 0).is_none());
+        assert!(compose_press(0, 6, 0).is_none());
+        assert!(compose_press(9, 6, 0).is_none());
+    }
+
+    #[test]
+    fn picker_ignores_complex_or_empty_scripts() {
+        assert_eq!(derive_picker(&macro_with_press("")), None);
+        assert_eq!(
+            derive_picker(&macro_with_press("Strip[0].B2=1; Strip[0].Gain+=1")),
+            None
+        );
+        // Custom parameters are not representable by the picker.
+        assert_eq!(derive_picker(&macro_with_press("Strip[0].Gain=1")), None);
+        // Only the exact Toggle / ON / OFF values round-trip.
+        assert_eq!(derive_picker(&macro_with_press("Strip[0].B2=2")), None);
+        assert_eq!(derive_picker(&macro_with_press("Strip[0].B2+=1")), None);
+    }
 }

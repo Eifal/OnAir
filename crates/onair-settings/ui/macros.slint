@@ -11,6 +11,10 @@ export component MacrosPage inherits Rectangle {
     in-out property <int> macro-mode-index: 0;
     in-out property <string> macro-press: "";
     in-out property <string> macro-release: "";
+    in-out property <int> macro-strip-index: 0;
+    in-out property <int> macro-button: 6;
+    in-out property <int> macro-action: 0;
+    in property <bool> macro-simple: true;
     in property <bool> capture-active: false;
     in property <int> capture-index: -1;
     in property <string> capture-message: "";
@@ -23,6 +27,7 @@ export component MacrosPage inherits Rectangle {
     callback capture;
     callback select(int);
     callback field(string, string);
+    callback picker(string, int);
 
     width: 100%;
     height: content.preferred-height + 4px;
@@ -136,10 +141,78 @@ export component MacrosPage inherits Rectangle {
                 }
             }
 
+            Rectangle { height: 1px; background: Theme.border; }
+
+            Text {
+                text: "Quick setup";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            Text {
+                text: root.macro-simple
+                    ? "Pick a strip and button, then choose what it should do. Press script is filled in for you."
+                    : "This macro uses a custom press script. Changing the options below will replace it.";
+                color: root.macro-simple ? Theme.text-muted : Theme.warning;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Strip";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    Dropdown {
+                        options: Theme.strip-options;
+                        current-index <=> root.macro-strip-index;
+                        horizontal-stretch: 1;
+                        selected(i) => { root.picker("strip", i); }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Button";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    Dropdown {
+                        options: Theme.vm-buttons;
+                        current-index <=> root.macro-button;
+                        horizontal-stretch: 1;
+                        selected(i) => { root.picker("button", i); }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Action";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    Dropdown {
+                        options: ["Toggle", "Turn ON", "Turn OFF"];
+                        current-index <=> root.macro-action;
+                        selected(i) => { root.picker("action", i); }
+                    }
+                }
+            }
+
             VerticalLayout {
                 spacing: 6px;
                 Text {
-                    text: "Press script";
+                    text: "Advanced: press script";
                     color: Theme.text;
                     font-size: 13px;
                     font-weight: 600;
@@ -154,7 +227,7 @@ export component MacrosPage inherits Rectangle {
             VerticalLayout {
                 spacing: 6px;
                 Text {
-                    text: "Release script (optional)";
+                    text: "Advanced: release script (optional)";
                     color: Theme.text;
                     font-size: 13px;
                     font-weight: 600;
@@ -196,8 +269,8 @@ export component MacrosPage inherits Rectangle {
         }
 
         Card {
-            title: "Script syntax";
-            subtitle: "Separate requests with ; or a new line. Voicemeeter parameter names look like Strip[0].B2.";
+            title: "Advanced: script reference";
+            subtitle: "Only needed for multiple requests or parameters the picker does not cover. Separate requests with ; or a new line.";
 
             Text {
                 text: "• Strip[0].B2=1 sets a parameter to a value.";

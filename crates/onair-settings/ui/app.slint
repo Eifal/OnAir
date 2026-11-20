@@ -96,6 +96,10 @@ export component AppWindow inherits Window {
     in-out property <int> macro-mode-index: 0;
     in-out property <string> macro-press: "";
     in-out property <string> macro-release: "";
+    in-out property <int> macro-strip-index: 0;
+    in-out property <int> macro-button: 6;
+    in-out property <int> macro-action: 0;
+    in property <bool> macro-simple: true;
     in property <int> capture-macro-index: -1;
 
     callback apply-now(string, string);
@@ -111,6 +115,7 @@ export component AppWindow inherits Window {
     callback macro-delete();
     callback macro-save();
     callback macro-field(string, string);
+    callback macro-picker(string, int);
     callback macro-capture(int);
     callback open-picker(string);
     callback picker-disc-pointer(float, float);
@@ -504,6 +509,10 @@ export component AppWindow inherits Window {
                         macro-mode-index <=> root.macro-mode-index;
                         macro-press <=> root.macro-press;
                         macro-release <=> root.macro-release;
+                        macro-strip-index <=> root.macro-strip-index;
+                        macro-button <=> root.macro-button;
+                        macro-action <=> root.macro-action;
+                        macro-simple: root.macro-simple;
                         capture-active: root.capture-active;
                         capture-index: root.capture-macro-index;
                         capture-message: root.capture-message;
@@ -515,6 +524,7 @@ export component AppWindow inherits Window {
                         capture => { root.macro-capture(root.macro-selected); }
                         select(i) => { root.macro-selected = i; root.macro-select(i); }
                         field(f, v) => { root.macro-field(f, v); }
+                        picker(f, v) => { root.macro-picker(f, v); }
                     }
 
                     if root.current-page == 5: AboutPage {

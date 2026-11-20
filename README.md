@@ -305,8 +305,14 @@ Details:
 
 Settings → **Macros** turns OnAir into a lightweight Voicemeeter MacroButtons
 replacement. Add any number of macros, capture a global key for each, and give
-it a Voicemeeter script. The overlay installs the same low-level hooks as the
+it a Voicemeeter action. The overlay installs the same low-level hooks as the
 main hotkey; there is no practical limit on the number of macros.
+
+For the common case you do not need to know Voicemeeter scripting at all:
+**Quick setup** has **Strip**, **Button** (A1–A5, B1–B3, Mute) and **Action**
+(Toggle / Turn ON / Turn OFF) dropdowns. Picking them writes the press script
+for you, e.g. `Strip[0].B2=!`. The script fields stay available under
+**Advanced** for multiple requests or parameters the picker does not cover.
 
 Each macro row is stored as one `macro=` line:
 
