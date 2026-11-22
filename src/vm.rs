@@ -16,6 +16,10 @@ type FnLogout = unsafe extern "system" fn() -> i32;
 type FnDirty = unsafe extern "system" fn() -> i32;
 type FnGetFloat = unsafe extern "system" fn(*mut u8, *mut f32) -> i32;
 type FnSetFloat = unsafe extern "system" fn(*mut u8, f32) -> i32;
+// long __stdcall VBVMR_GetLevel(long nType, long nuChannel, float* pValue);
+type FnLevel = unsafe extern "system" fn(i32, i32, *mut f32) -> i32;
+// long __stdcall VBVMR_GetVoicemeeterType(long* pType); 1=Standard 2=Banana 3=Potato
+type FnType = unsafe extern "system" fn(*mut i32) -> i32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MicState {
@@ -40,10 +44,16 @@ pub struct VmClient {
     f_dirty: Option<FnDirty>,
     f_get: Option<FnGetFloat>,
     f_set: Option<FnSetFloat>,
+    f_level: Option<FnLevel>,
+    f_type: Option<FnType>,
     pub logged_in: bool,
     last_login: Option<std::time::Instant>,
     last_load_attempt: Option<std::time::Instant>,
     pub dll_missing: bool,
+    /// Voicemeeter edition reported after a successful login: 1=Standard,
+    /// 2=Banana, 3=Potato. Cleared on disconnect because the user may restart
+    /// with a different edition.
+    edition: Option<i32>,
 }
 
 /// How often to retry registry/path/LoadLibrary when Voicemeeter's DLL is
@@ -75,10 +85,13 @@ impl VmClient {
             f_dirty: None,
             f_get: None,
             f_set: None,
+            f_level: None,
+            f_type: None,
             logged_in: false,
             last_login: None,
             last_load_attempt: None,
             dll_missing: false,
+            edition: None,
         };
         c.try_load();
         c
@@ -127,6 +140,16 @@ impl VmClient {
                     setf as *const (),
                 ));
             }
+            // Level/edition are optional too: a very old DLL still shows the
+            // ON/OFF state, it just cannot animate the wave style.
+            if let Some(level) = GetProcAddress(h, windows::core::s!("VBVMR_GetLevel")) {
+                self.f_level = Some(std::mem::transmute::<*const (), FnLevel>(
+                    level as *const (),
+                ));
+            }
+            if let Some(kind) = GetProcAddress(h, windows::core::s!("VBVMR_GetVoicemeeterType")) {
+                self.f_type = Some(std::mem::transmute::<*const (), FnType>(kind as *const ()));
+            }
             self.lib = Some(h);
             self.dll_missing = false;
         }
@@ -168,6 +191,7 @@ impl VmClient {
             let rep = unsafe { f_login() };
             if rep == 0 || rep == 1 {
                 self.logged_in = true;
+                self.refresh_edition();
                 // rep==1 means app not running yet; still try reading (will report no server).
             } else {
                 self.logged_in = false;
@@ -218,6 +242,55 @@ impl VmClient {
             }
         }
         self.logged_in = false;
+        self.edition = None;
+    }
+
+    /// Fetch and cache the edition once per login. Called right after the
+    /// Remote pipe opens and lazily by `edition()` if the first attempt hit a
+    /// server that was not ready yet.
+    fn refresh_edition(&mut self) {
+        if !self.logged_in {
+            return;
+        }
+        let Some(f) = self.f_type else {
+            return;
+        };
+        let mut kind: i32 = 0;
+        if unsafe { f(&mut kind as *mut i32) } == 0 {
+            self.edition = Some(kind);
+        }
+    }
+
+    /// 1=Standard, 2=Banana, 3=Potato. `None` when Voicemeeter is not
+    /// reachable; the caller then falls back to a static wave (or a manually
+    /// configured `level_channel`).
+    pub fn edition(&mut self) -> Option<i32> {
+        if let Some(kind) = self.edition {
+            return Some(kind);
+        }
+        if !self.logged_in {
+            return None;
+        }
+        self.refresh_edition();
+        self.edition
+    }
+
+    /// Read one input level. `level_type`: 0=pre-fader, 1=post-fader,
+    /// 2=post-mute, 3=output. Returns linear amplitude (0..1+) or `None` on
+    /// any error / while logged out. Never logs out on transient failures so
+    /// `poll()` keeps owning the reconnect throttle.
+    pub fn get_level(&mut self, level_type: u32, channel: u32) -> Option<f32> {
+        let f = self.f_level?;
+        if !self.logged_in {
+            return None;
+        }
+        let mut value: f32 = 0.0;
+        let rep = unsafe { f(level_type.min(3) as i32, channel as i32, &mut value) };
+        if rep == 0 {
+            Some(value.max(0.0))
+        } else {
+            None
+        }
     }
 
     /// One immediate login attempt (no throttle). Returns true when the
@@ -230,6 +303,7 @@ impl VmClient {
         let rep = unsafe { f_login() };
         if rep == 0 || rep == 1 {
             self.logged_in = true;
+            self.refresh_edition();
             true
         } else {
             self.logged_in = false;
@@ -405,6 +479,9 @@ impl VmClient {
         self.f_dirty = None;
         self.f_get = None;
         self.f_set = None;
+        self.f_level = None;
+        self.f_type = None;
+        self.edition = None;
         self.last_login = None;
     }
 }
@@ -412,6 +489,34 @@ impl VmClient {
 impl Drop for VmClient {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Strip index from a canonical parameter such as `Strip[3].B2`. Returns
+/// `None` for buses, macros and custom names (those cannot be mapped to an
+/// input level automatically).
+pub fn strip_index(param: &str) -> Option<u32> {
+    let rest = param.trim().strip_prefix("Strip[")?;
+    let end = rest.find(']')?;
+    rest[..end].parse().ok()
+}
+
+/// Input channels (left, right) for a strip index in the given edition.
+/// Hardware strips are stereo (2 channels); virtual strips expose 8 channels.
+/// Voicemeeter editions: 1=Standard (2 hardware strips), 2=Banana (3),
+/// 3=Potato (5).
+pub fn strip_channels(strip: u32, edition: i32) -> Option<(u32, u32)> {
+    let hw = match edition {
+        1 => 2,
+        2 => 3,
+        3 => 5,
+        _ => return None,
+    };
+    if strip < hw {
+        Some((2 * strip, 2 * strip + 1))
+    } else {
+        let base = 2 * hw + 8 * (strip - hw);
+        Some((base, base + 1))
     }
 }
 
@@ -512,5 +617,33 @@ mod tests {
     fn flag_maps_booleans_to_button_values() {
         assert_eq!(flag(true), 1.0);
         assert_eq!(flag(false), 0.0);
+    }
+
+    #[test]
+    fn strip_index_accepts_only_strip_parameters() {
+        assert_eq!(strip_index("Strip[0].B2"), Some(0));
+        assert_eq!(strip_index("Strip[7].Mute"), Some(7));
+        assert_eq!(strip_index(" Bus[0].Mute"), None);
+        assert_eq!(strip_index("Strip[x].B2"), None);
+        assert_eq!(strip_index("MacroButton[0].Trigger"), None);
+    }
+
+    #[test]
+    fn strip_channels_follow_hardware_then_virtual_layout() {
+        // Standard: 2 hardware strips (2 channels), virtual starts at 4.
+        assert_eq!(strip_channels(0, 1), Some((0, 1)));
+        assert_eq!(strip_channels(1, 1), Some((2, 3)));
+        assert_eq!(strip_channels(2, 1), Some((4, 5)));
+        // Banana: 3 hardware strips (6 channels), virtual starts at 6.
+        assert_eq!(strip_channels(2, 2), Some((4, 5)));
+        assert_eq!(strip_channels(3, 2), Some((6, 7)));
+        assert_eq!(strip_channels(4, 2), Some((14, 15)));
+        // Potato: 5 hardware strips (10 channels), virtual starts at 10.
+        assert_eq!(strip_channels(4, 3), Some((8, 9)));
+        assert_eq!(strip_channels(5, 3), Some((10, 11)));
+        assert_eq!(strip_channels(7, 3), Some((26, 27)));
+        // Unknown edition cannot be mapped automatically.
+        assert_eq!(strip_channels(0, 0), None);
+        assert_eq!(strip_channels(0, 9), None);
     }
 }

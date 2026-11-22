@@ -21,7 +21,7 @@ use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_RETURN, VK_SPACE, VK_UP,
+    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -39,10 +39,12 @@ const SEP_H96: i32 = 9;
 const PAD_X96: i32 = 12;
 const PAD_Y96: i32 = 5;
 const CHECK_W96: i32 = 24;
+const ARROW_W96: i32 = 20;
 const RADIUS96: i32 = 8;
 const MIN_W96: i32 = 190;
 
 const TEXT: (u8, u8, u8) = (0xF5, 0xF5, 0xF5);
+const ARROW: (u8, u8, u8) = (0xC8, 0xC8, 0xD0);
 const HIGHLIGHT: (u8, u8, u8) = (0x00, 0x67, 0xC0);
 const FALLBACK_BG: (u8, u8, u8) = (0x2B, 0x2D, 0x33);
 // AABBGGRR: alpha 80%, RGB #2B2D33.
@@ -52,6 +54,7 @@ const ACCENT_COLOR: u32 = 0xCC33_2D2B;
 enum RowKind {
     Action,
     Check,
+    Submenu,
     Separator,
 }
 
@@ -67,6 +70,7 @@ struct Layout {
     dpi: u32,
     pad_x: i32,
     check_w: i32,
+    arrow_w: i32,
     radius: i32,
     rows: Vec<Row>,
     font: HFONT,
@@ -75,6 +79,7 @@ struct Layout {
 struct Menu {
     hwnd: HWND,
     content: HWND,
+    parent: Option<HWND>,
     items: Vec<Item>,
     layout: Layout,
     view_height: i32,
@@ -82,6 +87,8 @@ struct Menu {
     hot: Option<usize>,
     pressed: Option<usize>,
     last_mouse: Option<(i32, i32)>,
+    open: Option<usize>,
+    child: Option<HWND>,
     accent: bool,
 }
 
@@ -241,13 +248,16 @@ fn item_kind(item: &Item) -> RowKind {
     match item {
         Item::Action { .. } => RowKind::Action,
         Item::Check { .. } => RowKind::Check,
+        Item::Submenu { .. } => RowKind::Submenu,
         Item::Separator => RowKind::Separator,
     }
 }
 
 fn item_label(item: &Item) -> &str {
     match item {
-        Item::Action { label, .. } | Item::Check { label, .. } => label,
+        Item::Action { label, .. } | Item::Check { label, .. } | Item::Submenu { label, .. } => {
+            label
+        }
         Item::Separator => "",
     }
 }
@@ -291,11 +301,13 @@ fn build_layout(items: &[Item], dpi: u32, font: HFONT) -> Layout {
     let pad_x = scale(PAD_X96, dpi);
     let pad_y = scale(PAD_Y96, dpi);
     let check_w = scale(CHECK_W96, dpi);
+    let arrow_w = scale(ARROW_W96, dpi);
     let radius = scale(RADIUS96, dpi);
     let item_h = scale(ITEM_H96, dpi);
     let sep_h = scale(SEP_H96, dpi).max(1);
     let max_label = measure_labels(items, font);
-    let width = (pad_x * 2 + check_w + max_label + scale(4, dpi)).max(scale(MIN_W96, dpi));
+    let width =
+        (pad_x * 2 + check_w + max_label + arrow_w + scale(4, dpi)).max(scale(MIN_W96, dpi));
 
     let mut rows = Vec::with_capacity(items.len());
     let mut y = pad_y;
@@ -326,6 +338,7 @@ fn build_layout(items: &[Item], dpi: u32, font: HFONT) -> Layout {
         dpi,
         pad_x,
         check_w,
+        arrow_w,
         radius,
         rows,
         font,
@@ -480,7 +493,11 @@ fn text_alpha(layout: &Layout, items: &[Item], scroll: i32, view_h: i32) -> Vec<
             if bottom <= 0 || top >= view_h {
                 continue;
             }
-            let right = layout.width - layout.pad_x;
+            let right = if row.kind == RowKind::Submenu {
+                layout.width - layout.pad_x - layout.arrow_w
+            } else {
+                layout.width - layout.pad_x
+            };
             let mut rect = RECT {
                 left: layout.pad_x + layout.check_w,
                 top,
@@ -549,7 +566,8 @@ fn render_content(menu: &Menu) -> Vec<u32> {
             continue;
         }
 
-        let highlighted = menu.hot == Some(row.item) && is_enabled(row.kind);
+        let highlighted =
+            is_enabled(row.kind) && (menu.hot == Some(row.item) || menu.open == Some(row.item));
 
         if highlighted {
             let l = (6.0 * s).round();
@@ -606,10 +624,44 @@ fn render_content(menu: &Menu) -> Vec<u32> {
             }
         }
 
+        if row.kind == RowKind::Submenu {
+            let cx = (layout.width - layout.pad_x - layout.arrow_w / 2) as f32;
+            let half = (1.05 * s).max(0.8);
+            draw_segment(
+                &mut px,
+                w,
+                h,
+                cx - 1.8 * s,
+                cy - 3.4 * s,
+                cx + 1.8 * s,
+                cy,
+                half,
+                ARROW,
+            );
+            draw_segment(
+                &mut px,
+                w,
+                h,
+                cx + 1.8 * s,
+                cy,
+                cx - 1.8 * s,
+                cy + 3.4 * s,
+                half,
+                ARROW,
+            );
+        }
+
         // Composite the label coverage with the row's text colour.
         let color = TEXT;
         let tx0 = (layout.pad_x + layout.check_w).max(0);
-        let tx1 = (layout.width - layout.pad_x).min(layout.width);
+        let tx1 = (layout.width
+            - layout.pad_x
+            - if row.kind == RowKind::Submenu {
+                layout.arrow_w
+            } else {
+                0
+            })
+        .max(tx0);
         let y0 = top.max(0);
         let y1 = bottom.min(menu.view_height);
         for yy in y0..y1 {
@@ -803,9 +855,11 @@ fn root_position(cursor: POINT, w: i32, h: i32) -> (i32, i32) {
     (x, y)
 }
 
+#[inline(never)]
 unsafe fn create_menu(
     s: &mut Session,
     items: Vec<Item>,
+    parent: Option<HWND>,
     anchor: POINT,
     max_h: i32,
 ) -> Option<HWND> {
@@ -853,7 +907,31 @@ unsafe fn create_menu(
     let layout = build_layout(&items, dpi, font);
     let view_h = layout.height.min(max_h.max(scale(40, dpi)));
 
-    let (x, y) = root_position(anchor, layout.width, view_h);
+    let (x, y) = if let Some(parent) = parent {
+        // A submenu opens at the parent's right edge, aligned with its row.
+        // Flip to the left side when it would leave the monitor.
+        let mut pr = RECT::default();
+        let _ = GetWindowRect(parent, &mut pr);
+        let work = work_area_from_point(POINT {
+            x: pr.left,
+            y: anchor.y,
+        });
+        let mut x = pr.right;
+        if x + layout.width > work.right {
+            x = pr.left - layout.width;
+        }
+        x = x
+            .max(work.left)
+            .min((work.right - layout.width).max(work.left));
+        let mut y = anchor.y;
+        if y + view_h > work.bottom {
+            y = work.bottom - view_h;
+        }
+        y = y.max(work.top);
+        (x, y)
+    } else {
+        root_position(anchor, layout.width, view_h)
+    };
     let _ = SetWindowPos(
         hwnd,
         Some(HWND_TOPMOST),
@@ -899,6 +977,7 @@ unsafe fn create_menu(
     let menu = Menu {
         hwnd,
         content,
+        parent,
         items,
         layout,
         view_height: view_h,
@@ -906,6 +985,8 @@ unsafe fn create_menu(
         hot: None,
         pressed: None,
         last_mouse: None,
+        open: None,
+        child: None,
         accent: false,
     };
     s.windows.push(menu);
@@ -1068,6 +1149,7 @@ unsafe fn activate_item(s: &mut Session, idx: usize, item: usize) {
             let id = *id;
             close_session(s, Some(id));
         }
+        Item::Submenu { .. } => open_submenu(s, idx, item),
         Item::Separator => {}
     }
 }
@@ -1100,6 +1182,92 @@ fn hit_test(menu: &Menu, x: i32, y: i32) -> Option<usize> {
         .iter()
         .find(|r| cy >= r.rect.top && cy < r.rect.bottom && is_enabled(r.kind))
         .map(|r| r.item)
+}
+
+fn collect_tree(s: &Session, hwnd: HWND, out: &mut Vec<HWND>) {
+    out.push(hwnd);
+    if let Some(idx) = menu_index(s, hwnd) {
+        if let Some(child) = s.windows[idx].child {
+            collect_tree(s, child, out);
+        }
+    }
+}
+
+/// Remove a child menu (and anything cascaded from it) and return focus to
+/// the parent. The parent's highlighted row is kept.
+fn close_submenu(s: &mut Session, parent_idx: usize) {
+    let child = s.windows[parent_idx].child.take();
+    let open = s.windows[parent_idx].open.take();
+    if open.is_some() {
+        s.windows[parent_idx].hot = open;
+    }
+    let Some(child) = child else {
+        return;
+    };
+    let mut tree = Vec::new();
+    collect_tree(s, child, &mut tree);
+    for hwnd in tree.iter().rev() {
+        if let Some(idx) = menu_index(s, *hwnd) {
+            s.windows.remove(idx);
+        }
+    }
+    unsafe {
+        let parent_hwnd = s.windows[parent_idx].hwnd;
+        refresh_content(&s.windows[parent_idx]);
+        let _ = SetForegroundWindow(parent_hwnd);
+        let _ = SetFocus(Some(parent_hwnd));
+    }
+}
+
+/// Open the submenu attached to `item_idx`. Clicking the already-open row
+/// closes it again. A submenu anchors to the parent's right edge and flips
+/// to the left side near the monitor edge.
+unsafe fn open_submenu(s: &mut Session, parent_idx: usize, item_idx: usize) {
+    if s.windows[parent_idx].open == Some(item_idx) && s.windows[parent_idx].child.is_some() {
+        close_submenu(s, parent_idx);
+        return;
+    }
+    if s.windows[parent_idx].child.is_some() {
+        close_submenu(s, parent_idx);
+    }
+    let parent_hwnd = s.windows[parent_idx].hwnd;
+    let (items, anchor) = {
+        let menu = &s.windows[parent_idx];
+        let Some(row) = row_for_item(menu, item_idx) else {
+            return;
+        };
+        let Item::Submenu { items, .. } = &menu.items[item_idx] else {
+            return;
+        };
+        let mut pt = POINT {
+            x: 0,
+            y: row.rect.top - menu.scroll,
+        };
+        let _ = ClientToScreen(menu.hwnd, &mut pt);
+        (items.clone(), pt)
+    };
+    let mut pr = RECT::default();
+    let _ = GetWindowRect(parent_hwnd, &mut pr);
+    let work = work_area_from_point(POINT {
+        x: pr.left,
+        y: pr.top,
+    });
+    let max_h = (work.bottom - work.top - scale(8, 96)).max(scale(120, 96));
+    let created = create_menu(s, items, Some(parent_hwnd), anchor, max_h);
+    if let Some(child) = created {
+        let pi = menu_index(s, parent_hwnd).unwrap_or(parent_idx);
+        s.windows[pi].child = Some(child);
+        s.windows[pi].open = Some(item_idx);
+        refresh_content(&s.windows[pi]);
+        if let Some(ci) = menu_index(s, child) {
+            let first = first_enabled(&s.windows[ci].layout.rows);
+            s.windows[ci].hot = first;
+            if let Some(first) = first {
+                scroll_to_row(&mut s.windows[ci], first);
+            }
+            refresh_content(&s.windows[ci]);
+        }
+    }
 }
 
 unsafe fn ensure_mouse_tracking(hwnd: HWND) {
@@ -1170,6 +1338,11 @@ unsafe fn handle_glass_message(
             let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             let pressed = hit_test(&s.windows[idx], x, y);
+            // Clicking a different row while a submenu is open dismisses it
+            // first, like a native cascading menu.
+            if s.windows[idx].child.is_some() && s.windows[idx].open != pressed {
+                close_submenu(s, idx);
+            }
             s.windows[idx].pressed = pressed;
             if pressed != s.windows[idx].hot {
                 s.windows[idx].hot = pressed;
@@ -1220,8 +1393,38 @@ unsafe fn handle_glass_message(
         }
         WM_KEYDOWN => {
             let vk = wp.0 as u16;
-            if vk == VK_ESCAPE.0 || vk == VK_LEFT.0 {
-                close_session(s, None);
+            if vk == VK_ESCAPE.0 {
+                // Back out one level at a time, like a native cascading menu.
+                let parent = s.windows[idx].parent;
+                if let Some(pi) = parent.and_then(|p| menu_index(s, p)) {
+                    close_submenu(s, pi);
+                } else {
+                    close_session(s, None);
+                }
+                return LRESULT(0);
+            }
+            if vk == VK_LEFT.0 {
+                let parent = s.windows[idx].parent;
+                if let Some(pi) = parent.and_then(|p| menu_index(s, p)) {
+                    close_submenu(s, pi);
+                } else {
+                    close_session(s, None);
+                }
+                return LRESULT(0);
+            }
+            if vk == VK_RIGHT.0 {
+                if let Some(item) = s.windows[idx].hot {
+                    if matches!(s.windows[idx].items[item], Item::Submenu { .. }) {
+                        open_submenu(s, idx, item);
+                        let child = s.windows[idx].child;
+                        if let Some(ci) = child.and_then(|c| menu_index(s, c)) {
+                            let first = first_enabled(&s.windows[ci].layout.rows);
+                            s.windows[ci].hot = first;
+                            refresh_content(&s.windows[ci]);
+                            let _ = SetFocus(Some(s.windows[ci].hwnd));
+                        }
+                    }
+                }
                 return LRESULT(0);
             }
             if vk == VK_UP.0 {
@@ -1381,7 +1584,7 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         let max_h = (work.bottom - work.top - scale(8, 96)).max(scale(120, 96));
         let root = {
             let s = session().unwrap();
-            create_menu(s, items, cursor, max_h)
+            create_menu(s, items, None, cursor, max_h)
         };
         let Some(root) = root else {
             let _ = cleanup_session();
@@ -1436,6 +1639,7 @@ mod tests {
         Menu {
             hwnd: HWND::default(),
             content: HWND::default(),
+            parent: None,
             items: Vec::new(),
             layout: Layout {
                 width: 200,
@@ -1443,6 +1647,7 @@ mod tests {
                 dpi: 96,
                 pad_x: scale(PAD_X96, 96),
                 check_w: scale(CHECK_W96, 96),
+                arrow_w: scale(ARROW_W96, 96),
                 radius: scale(RADIUS96, 96),
                 rows,
                 font: HFONT::default(),
@@ -1452,6 +1657,8 @@ mod tests {
             hot: None,
             pressed: None,
             last_mouse: None,
+            open: None,
+            child: None,
             accent: false,
         }
     }

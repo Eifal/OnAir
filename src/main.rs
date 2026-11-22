@@ -7,6 +7,7 @@ mod hotkey;
 mod render;
 mod tray;
 mod vm;
+mod wave;
 mod window;
 
 use windows::core::PCWSTR;
@@ -19,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use config::{
     parse_macro_script, AppConfig, ConfigKey, MacroMode, MacroOp, MacroStep, MenuStyle, MouseBtn,
-    ToggleKey, Trigger, TriggerMode, VmMode,
+    ToggleKey, Trigger, TriggerMode, VisualStyle, VmMode,
 };
 use vm::{MicState, VmClient};
 use window::{
@@ -76,6 +77,18 @@ struct AppState {
     hold_down_at: Option<std::time::Instant>,
     reload_msg: u32,
     capture_msg: u32,
+    /// Reused pixel buffer for every overlay frame (no per-frame allocation).
+    pixels: Vec<u32>,
+    /// Reused DIB + memory DC, recreated only when the overlay size changes.
+    surface: Option<render::Surface>,
+    /// `Some` while the animation timer is running (wave style only).
+    speaking: Option<wave::Speaking>,
+    /// Input channels captured when the animation starts.
+    anim_channels: Option<(u32, u32)>,
+    /// Timestamp of the previous animation tick, for frame-rate independent
+    /// phase and release timing.
+    anim_last: Option<std::time::Instant>,
+    anim_ms: u32,
 }
 
 static mut APP: Option<AppState> = None;
@@ -111,9 +124,11 @@ fn sync_pos_from_window() {
     }
 }
 
-fn redraw_locked() {
-    // Redraw overlay from current cfg + mic state.
-    let (hwnd, size, opacity, locked, bg, dot, style, bg_op) = {
+/// Draw one frame. `speaking` is `(smoothed level, phase seconds)` for the
+/// wave style; `None` draws the static/minimum-bar frame. The pixel buffer
+/// and DIB are reused.
+fn draw_frame(speaking: Option<(f32, f32)>) {
+    let (hwnd, size, opacity, locked, bg, dot, style, bg_op, bars) = {
         let a = app_mut();
         (
             a.hwnd,
@@ -124,15 +139,205 @@ fn redraw_locked() {
             vm::dot_color(&a.cfg, &a.mic),
             a.cfg.visual_style,
             a.cfg.bg_opacity,
+            a.cfg.wave_bars,
         )
     };
-    let pixels = render::draw_overlay(size, bg, dot, !locked, style, bg_op);
-    render::update_layered_window(hwnd, &pixels, size, opacity);
+    let needed = (size as usize) * (size as usize);
+    let wave_view = if style == VisualStyle::Wave {
+        let (level, phase) = speaking.unwrap_or((0.0, 0.0));
+        Some(render::WaveView { level, phase, bars })
+    } else {
+        None
+    };
+    let a = app_mut();
+    if a.pixels.len() != needed {
+        a.pixels.resize(needed, 0);
+    }
+    render::draw_overlay_into(
+        &mut a.pixels,
+        size,
+        bg,
+        dot,
+        !locked,
+        style,
+        bg_op,
+        wave_view,
+    );
+    if a.surface.as_ref().map(|s| s.size()) != Some((size, size)) {
+        a.surface = render::Surface::new(size, size);
+    }
+    if let Some(surface) = a.surface.as_mut() {
+        surface.upload(hwnd, &a.pixels, opacity);
+    }
+}
+
+fn redraw_locked() {
+    draw_frame(None);
+}
+
+fn redraw_speaking() {
+    let frame = app_mut().speaking.map(|s| (s.level, s.phase));
+    draw_frame(frame);
+}
+
+/// Stop the animation timer and drop the speaking state. The caller decides
+/// whether a final static frame is needed.
+fn stop_anim() {
+    let hwnd = app_mut().hwnd;
+    unsafe {
+        let _ = KillTimer(Some(hwnd), window::TIMER_ANIM);
+    }
+    let a = app_mut();
+    a.speaking = None;
+    a.anim_channels = None;
+    a.anim_last = None;
+    a.anim_ms = 0;
+}
+
+/// Input channels for the current `vm_param`. A manual `level_channel`
+/// bypasses the edition/strip mapping. `None` means "show a static wave".
+fn wave_channels() -> Option<(u32, u32)> {
+    let (manual, strip) = {
+        let a = app_mut();
+        (a.cfg.level_channel, vm::strip_index(&a.cfg.vm_param))
+    };
+    if let Some(channel) = manual {
+        return Some((channel, channel.saturating_add(1)));
+    }
+    let strip = strip?;
+    let edition = app_mut().vm.edition()?;
+    vm::strip_channels(strip, edition)
+}
+
+/// Read the louder of the two input channels and normalize it against the
+/// current threshold. `None` when the level API is unavailable.
+fn level_norm(channels: (u32, u32), level_type: u32, threshold_db: f32) -> Option<f32> {
+    let amp = {
+        let a = app_mut();
+        let left = a.vm.get_level(level_type, channels.0);
+        let right = a.vm.get_level(level_type, channels.1);
+        match (left, right) {
+            (None, None) => return None,
+            (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+        }
+    };
+    Some(wave::normalize_db(wave::amp_to_db(amp), threshold_db))
+}
+
+fn start_speaking(level: f32, channels: (u32, u32)) {
+    let (hwnd, fps) = {
+        let a = app_mut();
+        (a.hwnd, a.cfg.anim_fps)
+    };
+    let interval = (1000 / fps.max(1)).max(10);
+    {
+        let a = app_mut();
+        a.speaking = Some(wave::Speaking::new(level));
+        a.anim_channels = Some(channels);
+        a.anim_last = Some(std::time::Instant::now());
+        a.anim_ms = interval;
+    }
+    unsafe {
+        let _ = SetTimer(Some(hwnd), window::TIMER_ANIM, interval, None);
+    }
+    redraw_speaking();
+}
+
+/// Poll-tick work for the wave style. Reads the level only when the overlay
+/// is visible and the mic is ON; starts the animation once sound crosses the
+/// threshold.
+fn wave_quiet_tick() {
+    let (style, on, visible, level_type, threshold) = {
+        let a = app_mut();
+        (
+            a.cfg.visual_style,
+            a.mic == MicState::On,
+            a.cfg.overlay_visible,
+            a.cfg.level_type,
+            a.cfg.speak_threshold_db as f32,
+        )
+    };
+    if style != VisualStyle::Wave || !on || !visible {
+        return;
+    }
+    let Some(channels) = wave_channels() else {
+        return;
+    };
+    let Some(norm) = level_norm(channels, level_type, threshold) else {
+        return;
+    };
+    if norm > 0.0 {
+        start_speaking(norm, channels);
+    }
+}
+
+/// One animation-timer tick: read level, smooth, redraw, and stop after the
+/// release window (or immediately when the mic/visibility goes away).
+fn anim_tick() {
+    let (style, on, visible, level_type, threshold, release_ms, fps) = {
+        let a = app_mut();
+        (
+            a.cfg.visual_style,
+            a.mic == MicState::On,
+            a.cfg.overlay_visible,
+            a.cfg.level_type,
+            a.cfg.speak_threshold_db as f32,
+            a.cfg.speak_release_ms,
+            a.cfg.anim_fps,
+        )
+    };
+    if style != VisualStyle::Wave || !on || !visible {
+        stop_anim();
+        redraw_locked();
+        return;
+    }
+    let Some(channels) = app_mut().anim_channels else {
+        stop_anim();
+        redraw_locked();
+        return;
+    };
+    let target = level_norm(channels, level_type, threshold).unwrap_or(0.0);
+    let now = std::time::Instant::now();
+    let (dt, last) = {
+        let a = app_mut();
+        (a.anim_last, a.anim_ms)
+    };
+    let dt_ms = dt
+        .map(|t| now.duration_since(t).as_millis().clamp(1, 250) as u32)
+        .unwrap_or(last.max(1));
+    let alive = {
+        let a = app_mut();
+        match a.speaking.as_mut() {
+            Some(speaking) => speaking.tick(target, dt_ms, release_ms),
+            None => false,
+        }
+    };
+    if alive {
+        let interval = (1000 / fps.max(1)).max(10);
+        {
+            let a = app_mut();
+            a.anim_last = Some(now);
+            if a.anim_ms != interval {
+                a.anim_ms = interval;
+                let hwnd = a.hwnd;
+                unsafe {
+                    let _ = SetTimer(Some(hwnd), window::TIMER_ANIM, interval, None);
+                }
+            }
+        }
+        redraw_speaking();
+    } else {
+        stop_anim();
+        redraw_locked();
+    }
 }
 
 /// Show or hide the overlay window. Hooks, macros and the tray icon stay
 /// active while it is hidden, so the mic hotkey keeps working.
 fn apply_visibility(hwnd: HWND, visible: bool) {
+    if !visible {
+        stop_anim();
+    }
     unsafe {
         let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
@@ -179,6 +384,9 @@ fn do_poll_and_update() {
         }
     };
     if changed {
+        if app_mut().mic != MicState::On {
+            stop_anim();
+        }
         redraw_locked();
         refresh_tray();
     }
@@ -602,6 +810,7 @@ fn apply_all_after_config_change() {
     // The caller must release a held PTT before swapping the parameter.
     // This reset is only a safety net and intentionally performs no VM
     // write, because the old parameter is no longer available here.
+    stop_anim();
     reset_hold_tracking();
     reset_macro_tracking();
     rebuild_macro_state(app_mut());
@@ -826,6 +1035,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             if wparam.0 == window::TIMER_POLL {
                 do_poll_and_update();
+                wave_quiet_tick();
                 // Keybind capture timeout.
                 if hotkey::is_capturing() {
                     let expired = app_mut()
@@ -851,6 +1061,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         apply_topmost(h1, true);
                     }
                 }
+            } else if wparam.0 == window::TIMER_ANIM {
+                anim_tick();
             }
             LRESULT(0)
         }
@@ -968,8 +1180,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             restore_hold_if_held();
             restore_macros_if_held();
             app_mut().vm.shutdown();
+            app_mut().surface = None;
             unsafe {
                 let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
+                let _ = KillTimer(Some(hwnd), window::TIMER_ANIM);
             }
             hotkey::shutdown();
             tray::remove_tray(hwnd);
@@ -1031,6 +1245,88 @@ fn handle_command(hwnd: HWND, id: u32) {
     }
     if id == ID_SETTINGS {
         tray::open_settings();
+        return;
+    }
+
+    let style = match id {
+        ID_STYLE_DOT => Some(VisualStyle::Dot),
+        ID_STYLE_RING => Some(VisualStyle::Ring),
+        ID_STYLE_BAR => Some(VisualStyle::Bar),
+        ID_STYLE_MINI => Some(VisualStyle::Mini),
+        ID_STYLE_WAVE => Some(VisualStyle::Wave),
+        _ => None,
+    };
+    if let Some(style) = style {
+        if app_mut().cfg.visual_style != style {
+            app_mut().cfg.visual_style = style;
+            stop_anim();
+            redraw_locked();
+            let _ = app_mut().cfg.save_keys(&[ConfigKey::VisualStyle]);
+            // Start speaking right away when the mic is already hot.
+            wave_quiet_tick();
+        }
+        return;
+    }
+
+    // Wave tuning: sensitivity, bar count and frame rate. Values persist and
+    // take effect on the next frame (the animation reads them every tick).
+    let mut saved: Option<ConfigKey> = None;
+    match id {
+        ID_WAVE_SENS_35 => {
+            app_mut().cfg.speak_threshold_db = -35;
+            saved = Some(ConfigKey::SpeakThresholdDb);
+        }
+        ID_WAVE_SENS_40 => {
+            app_mut().cfg.speak_threshold_db = -40;
+            saved = Some(ConfigKey::SpeakThresholdDb);
+        }
+        ID_WAVE_SENS_45 => {
+            app_mut().cfg.speak_threshold_db = -45;
+            saved = Some(ConfigKey::SpeakThresholdDb);
+        }
+        ID_WAVE_SENS_50 => {
+            app_mut().cfg.speak_threshold_db = -50;
+            saved = Some(ConfigKey::SpeakThresholdDb);
+        }
+        ID_WAVE_SENS_55 => {
+            app_mut().cfg.speak_threshold_db = -55;
+            saved = Some(ConfigKey::SpeakThresholdDb);
+        }
+        ID_WAVE_BARS_3 => {
+            app_mut().cfg.wave_bars = 3;
+            saved = Some(ConfigKey::WaveBars);
+        }
+        ID_WAVE_BARS_5 => {
+            app_mut().cfg.wave_bars = 5;
+            saved = Some(ConfigKey::WaveBars);
+        }
+        ID_WAVE_BARS_7 => {
+            app_mut().cfg.wave_bars = 7;
+            saved = Some(ConfigKey::WaveBars);
+        }
+        ID_WAVE_FPS_20 => {
+            app_mut().cfg.anim_fps = 20;
+            saved = Some(ConfigKey::AnimFps);
+        }
+        ID_WAVE_FPS_30 => {
+            app_mut().cfg.anim_fps = 30;
+            saved = Some(ConfigKey::AnimFps);
+        }
+        ID_WAVE_FPS_45 => {
+            app_mut().cfg.anim_fps = 45;
+            saved = Some(ConfigKey::AnimFps);
+        }
+        _ => {}
+    }
+    if let Some(key) = saved {
+        // A threshold or bar-count change should be visible immediately.
+        if app_mut().speaking.is_some() {
+            redraw_speaking();
+        } else {
+            redraw_locked();
+            wave_quiet_tick();
+        }
+        let _ = app_mut().cfg.save_keys(&[key]);
     }
 }
 
@@ -1128,6 +1424,12 @@ fn main() {
             hold_down_at: None,
             reload_msg,
             capture_msg,
+            pixels: Vec::new(),
+            surface: None,
+            speaking: None,
+            anim_channels: None,
+            anim_last: None,
+            anim_ms: 0,
         });
         rebuild_macro_state(app_mut());
 

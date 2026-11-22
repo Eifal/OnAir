@@ -70,9 +70,15 @@ Right-click the tray icon. Left click (or double-click) opens
 **OnAir Settings** directly instead:
 
 - Settings... (launches `onair-settings.exe` next to `onair.exe`)
+- Visual ▸ (Dot / Ring / Bar / Mini / Wave)
+- Wave ▸ (Sensitivity −35/−40/−45/−50/−55 dB, 3/5/7 bars, 20/30/45 FPS)
 - Lock position (checkmark)
 - Always on top (checkmark, re-asserted ~every 2 s)
+- Show overlay (checkmark)
 - Quit
+
+The **Visual** and **Wave** submenus change the running overlay
+immediately; the values are saved to `config.ini`.
 
 Everything else lives in the Settings window; the tray menu stays a
 quick stop, not a control panel. Changes made in Settings are written to
@@ -96,7 +102,7 @@ Pages:
 
 - **General** – size, opacity, lock position, always on top, show/hide the
   overlay, tray menu style (Glass acrylic / Native Win32).
-- **Appearance** – visual style (Dot/Ring/Bar/Mini), background opacity,
+- **Appearance** – visual style (Dot/Ring/Bar/Mini/Wave), background opacity,
   colours (on/off/unknown/background) with hex validation or a click-to-open
   HSV colour wheel (hue/saturation disc + value slider, Reset to defaults),
   and a live on-screen preview with a pulse animation.
@@ -140,6 +146,12 @@ trigger_mode=toggle
 hold_tap_ms=300
 visual_style=dot
 bg_opacity=90
+speak_threshold_db=-45
+speak_release_ms=300
+anim_fps=30
+wave_bars=5
+level_type=0
+level_channel=auto
 menu_style=glass
 color_on=2ECC71
 color_off=E74C3C
@@ -150,14 +162,17 @@ macro=F14|hold|Gain up|Strip[0].Gain+=1.5|Strip[0].Gain-=1.5
 ```
 
 Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
-`hold_tap_ms` 100–2000, `bg_opacity` 0–100. Colors are 6-digit hex without `#`.
+`hold_tap_ms` 100–2000, `bg_opacity` 0–100, `speak_threshold_db` −70…−20,
+`speak_release_ms` 100–1500, `anim_fps` 10–60, `wave_bars` 3–9,
+`level_type` 0–3. Colors are 6-digit hex without `#`.
 `trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
 `ptt`, `toggle+hold`); unknown falls back to `toggle`.
 `vm_mode` accepts `toggle` / `switch` (aliases: `swap`, `a/b`, `alternate`,
 `two buttons`); unknown falls back to `toggle`.
-`visual_style` accepts `dot` / `ring` / `bar` / `mini`
+`visual_style` accepts `dot` / `ring` / `bar` / `mini` / `wave`
 (aliases: `strip`/`pill` → bar, `circle`/`outline` → ring,
-`minimal`/`nobg` → mini); unknown falls back to `dot`.
+`minimal`/`nobg` → mini, `voice`/`speaking` → wave); unknown falls back
+to `dot`.
 `menu_style` accepts `glass` / `native` (aliases: `acrylic`/`blur`/`modern`
 → glass, `classic`/`win32`/`system` → native); unknown falls back to `glass`.
 `overlay_visible` (`true`/`false`, alias `show_overlay`) hides the window
@@ -173,9 +188,40 @@ without stopping hotkeys. `macro=` rows are repeatable and documented in
   (smallest color area, good for corner placement).
 - **Mini** — no background, just a small dot (~54% size)
   (minimal footprint; use 32–48 px, 80–100% opacity).
+- **Wave** — rounded square + 3–9 vertical capsule bars driven by the
+  Voicemeeter input level. Bars animate only while the microphone button is
+  **ON** and the level is above the sensitivity threshold; quiet, muted or
+  unknown states show flat minimum-height dots. No audio capture: the level
+  comes from `VBVMR_GetLevel` only.
 
 Settings → **Appearance → Visual** switches immediately and saves `config.ini`.
 Tray icon always stays Dot for recognizability.
+
+## Wave style
+
+The wave reads the level of the strip in `vm_param` (`Strip[n].…`):
+
+- `level_type` selects the tap: `0` pre-fader (default), `1` post-fader,
+  `2` post-mute, `3` output level. Post-mute (`2`) also drops to silence
+  when the strip is muted by Voicemeeter itself.
+- `level_channel=auto` maps the strip automatically for the detected
+  edition (Standard 2 / Banana 3 / Potato 5 hardware strips; virtual strips
+  use 8 channels each). A number overrides the left channel and uses the
+  next channel for the right; the louder one wins.
+- A `vm_param` that is not a `Strip[n]` parameter (bus, macro button, custom
+  name) has no level mapping; it shows the static minimum frame unless
+  `level_channel` is set manually.
+- `speak_threshold_db` (−70…−20, default −45) is silence; −10 dB is treated
+  as full scale. `speak_release_ms` (100–1500, default 300) is the hangover
+  before the animation stops and the bars settle at their minimum.
+- `anim_fps` (10–60, default 30) and `wave_bars` (3–9, default 5) control
+  the timer only while speaking; idle polling never starts it.
+- Tray → **Wave** has quick presets (sensitivity, bars, FPS). The full
+  range is available in `config.ini`.
+
+The renderer reuses one pixel buffer and one DIB per size, so an active
+30 FPS 48 px overlay stays well below ~1.5 % of one core and allocates
+nothing per frame.
 
 ## Background transparency (`bg_opacity`)
 
@@ -237,7 +283,11 @@ Uses the official **Voicemeeter Remote API** (`VoicemeeterRemote64.dll`):
   fallback `C:\Program Files (x86)\VB\Voicemeeter\VoicemeeterRemote64.dll`.
 - Functions: `VBVMR_Login` (0 OK, 1 OK but app not running),
   `VBVMR_Logout`, `VBVMR_IsParametersDirty`, `VBVMR_GetParameterFloat(name, &mut value)`
-  (0 OK, -2 no server, -3 unknown parameter). Verified against the
+  (0 OK, -2 no server, -3 unknown parameter), plus the optional
+  `VBVMR_GetLevel(type, channel, &mut value)` and
+  `VBVMR_GetVoicemeeterType(&mut type)` used by the wave style (1 Standard,
+  2 Banana, 3 Potato). Old DLLs without the level exports still show
+  ON/OFF normally. Verified against the
   VB-Audio "Voicemeeter Remote API" PDF + `VoicemeeterRemote.h`.
 - Polling every `poll_ms` (default 100 ms): login at most once/sec when
   disconnected, dirty-check (best effort), `GetParameterFloat`,
@@ -369,6 +419,7 @@ src/
   main.rs      // entry, single instance, message loop, timers, WndProc, tray IPC
   window.rs    // helpers: lock / topmost / pos / clamp / drag via HTCAPTION
   render.rs    // DIB + SDF rasterizer + UpdateLayeredWindow + tray icon
+  wave.rs      // pure wave level math, smoothing and speaking/quiet state
   vm.rs        // dynamic DLL loading, login, polling, MicState
   tray.rs      // Shell_NotifyIcon, minimal menu model, native menu, tooltip
   glassmenu.rs // custom acrylic tray menu (rendered from tray::build_model)

@@ -4,6 +4,19 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::VisualStyle;
 
+/// Wave parameters for one frame. `level` is the smoothed 0..1 level and
+/// `phase` advances in seconds; `bars` is the configured bar count.
+#[derive(Debug, Clone, Copy)]
+pub struct WaveView {
+    pub level: f32,
+    pub phase: f32,
+    pub bars: u32,
+}
+
+// Wave geometry as fractions of the overlay size. The inner square is the
+// usable area inside the rounded background; the level math lives in
+// `crate::wave` so it can be unit tested without Win32.
+
 /// Draw overlay pixels (BGRA premultiplied, top-down) of `size`x`size`.
 ///
 /// Styles (same square window, only drawing differs):
@@ -11,6 +24,7 @@ use crate::config::VisualStyle;
 /// - Ring: rounded square bg + colored ring (outer 80%, thickness ~10%)
 /// - Bar: rounded square bg + thin colored strip at the bottom
 /// - Mini: no bg, just a small filled dot (diameter ~54%)
+/// - Wave: rounded square bg + vertical capsule bars driven by voice level
 ///
 /// When `unlocked`, thin light outline around the rounded square.
 /// SDF AA: coverage = clamp(0.5 - dist, 0, 1)
@@ -21,7 +35,31 @@ pub fn draw_overlay(
     unlocked: bool,
     style: VisualStyle,
     bg_opacity: u32,
+    wave: Option<WaveView>,
 ) -> Vec<u32> {
+    let mut px = vec![0u32; (size as usize) * (size as usize)];
+    draw_overlay_into(&mut px, size, bg, dot, unlocked, style, bg_opacity, wave);
+    px
+}
+
+/// Same as `draw_overlay`, but writes into a caller-owned buffer so the
+/// animation can reuse one allocation for the lifetime of the process.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn draw_overlay_into(
+    px: &mut [u32],
+    size: u32,
+    bg: (u8, u8, u8),
+    dot: (u8, u8, u8),
+    unlocked: bool,
+    style: VisualStyle,
+    bg_opacity: u32,
+    wave: Option<WaveView>,
+) -> bool {
+    let needed = (size as usize) * (size as usize);
+    if size == 0 || px.len() < needed {
+        return false;
+    }
     let s = size as f32;
     let half = s / 2.0;
     let radius = s * 0.22;
@@ -30,7 +68,6 @@ pub fn draw_overlay(
     // SourceConstantAlpha in update_layered_window.
     let bg_alpha: f32 = (bg_opacity.clamp(0, 100) as f32 * 255.0 / 100.0).clamp(0.0, 255.0);
 
-    let mut px = vec![0u32; (size as usize) * (size as usize)];
     let box_half = half - radius; // for rounded-rect SDF
 
     // Bar geometry (shared for Bar style): thin strip at the bottom.
@@ -39,6 +76,30 @@ pub fn draw_overlay(
     let bar_hw = s * 0.35; // half width
     let bar_hh = s * 0.085; // half height
     let bar_r = (s * 0.06).min(bar_hw).min(bar_hh);
+
+    // Wave bar geometry: even spacing with gap == bar width. Heights are
+    // computed once per frame; the pixel loop only evaluates the SDFs.
+    let bars = wave.map(|w| w.bars.clamp(3, 9)).unwrap_or(5) as usize;
+    let inner_w = s * crate::wave::INNER_W;
+    let inner_h = s * crate::wave::INNER_H;
+    let bar_w = inner_w / (2.0 * bars as f32);
+    let gap = bar_w;
+    let total_w = bars as f32 * bar_w + (bars.saturating_sub(1)) as f32 * gap;
+    let wave_x0 = half - total_w * 0.5 + bar_w * 0.5;
+    let wave_step = bar_w + gap;
+    let min_h = bar_w;
+    let max_h = inner_h * crate::wave::MAX_H;
+    let mut heights = [0.0f32; 9];
+    if let Some(w) = wave {
+        let level = w.level.clamp(0.0, 1.0);
+        for (i, h) in heights.iter_mut().take(bars).enumerate() {
+            *h = crate::wave::bar_height(i, level, w.phase, min_h, max_h);
+        }
+    } else {
+        for h in heights.iter_mut().take(bars) {
+            *h = min_h;
+        }
+    }
 
     for y in 0..size {
         for x in 0..size {
@@ -85,6 +146,23 @@ pub fn draw_overlay(
                 VisualStyle::Mini => {
                     let mini_r = s * 0.27; // diameter ~54%
                     (0.5 - (dist_center - mini_r)).clamp(0.0, 1.0)
+                }
+                VisualStyle::Wave => {
+                    // Capsule (vertical segment + radius) per bar; take the
+                    // closest bar so adjacent capsules blend smoothly.
+                    let mut cov = 0.0f32;
+                    let cap_r = bar_w * 0.5;
+                    for (i, height) in heights.iter().take(bars).enumerate() {
+                        let cx = wave_x0 + i as f32 * wave_step;
+                        let seg = (height * 0.5 - cap_r).max(0.0);
+                        let ddx = (fx - cx).abs();
+                        let ddy = (fy - half).abs() - seg;
+                        let ox = ddx.max(0.0);
+                        let oy = ddy.max(0.0);
+                        let dist = (ox * ox + oy * oy).sqrt() + ddx.max(ddy).min(0.0) - cap_r;
+                        cov = cov.max((0.5 - dist).clamp(0.0, 1.0));
+                    }
+                    cov
                 }
             };
 
@@ -143,15 +221,137 @@ pub fn draw_overlay(
                 (ai << 24) | (ri << 16) | (gi << 8) | bi;
         }
     }
-    px
+    true
 }
 
-/// Push pixels to a layered window. `opacity_pct` 20..100 maps to SourceConstantAlpha.
-pub fn update_layered_window(hwnd: HWND, pixels: &[u32], size: u32, opacity_pct: u32) {
-    update_layered_window_rect(hwnd, pixels, size, size, opacity_pct);
+/// A reusable 32-bit top-down DIB + memory DC for one window size. Keeping
+/// it alive across frames means the animation never allocates a bitmap or a
+/// pixel buffer per tick.
+pub struct Surface {
+    hdc_screen: HDC,
+    hdc_mem: HDC,
+    hbmp: HBITMAP,
+    old_bmp: HGDIOBJ,
+    bits: *mut std::ffi::c_void,
+    width: u32,
+    height: u32,
 }
 
-/// Push a non-square premultiplied BGRA bitmap to a layered window.
+impl Surface {
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        unsafe {
+            let hdc_screen = GetDC(None);
+            if hdc_screen.is_invalid() {
+                return None;
+            }
+            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+            if hdc_mem.is_invalid() {
+                let _ = ReleaseDC(None, hdc_screen);
+                return None;
+            }
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD::default()],
+            };
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let Ok(hbmp) =
+                CreateDIBSection(Some(hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+            else {
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(None, hdc_screen);
+                return None;
+            };
+            if bits.is_null() {
+                let _ = DeleteObject(hbmp.into());
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(None, hdc_screen);
+                return None;
+            }
+            let old_bmp = SelectObject(hdc_mem, hbmp.into());
+            Some(Self {
+                hdc_screen,
+                hdc_mem,
+                hbmp,
+                old_bmp,
+                bits,
+                width,
+                height,
+            })
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Copy pixels (BGRA premultiplied, top-down) and push them to a layered
+    /// window. Skips the copy when the destination is a different size.
+    pub fn upload(&mut self, hwnd: HWND, pixels: &[u32], opacity_pct: u32) {
+        let count = (self.width as usize * self.height as usize).min(pixels.len());
+        if count == 0 {
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr() as *const u8,
+                self.bits as *mut u8,
+                count * 4,
+            );
+            let alpha = ((opacity_pct.clamp(20, 100) * 255) / 100) as u8;
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: alpha,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            let size_win = SIZE {
+                cx: self.width as i32,
+                cy: self.height as i32,
+            };
+            let pt_src = POINT { x: 0, y: 0 };
+            let _ = UpdateLayeredWindow(
+                hwnd,
+                Some(self.hdc_screen),
+                None, // keep current position
+                Some(&size_win as *const SIZE),
+                Some(self.hdc_mem),
+                Some(&pt_src as *const POINT),
+                COLORREF(0),
+                Some(&blend as *const BLENDFUNCTION),
+                ULW_ALPHA,
+            );
+        }
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.hdc_mem, self.old_bmp);
+            let _ = DeleteObject(self.hbmp.into());
+            let _ = DeleteDC(self.hdc_mem);
+            let _ = ReleaseDC(None, self.hdc_screen);
+        }
+    }
+}
+
+/// Push a non-square premultiplied BGRA bitmap to a layered window. Short
+/// lived helper for menus and the tray icon; the overlay keeps a `Surface`.
 pub fn update_layered_window_rect(
     hwnd: HWND,
     pixels: &[u32],
@@ -159,79 +359,8 @@ pub fn update_layered_window_rect(
     height: u32,
     opacity_pct: u32,
 ) {
-    unsafe {
-        let width_i = width as i32;
-        let height_i = height as i32;
-        // Source DC + 32-bit top-down DIB
-        let hdc_screen = GetDC(None);
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width_i,
-                biHeight: -height_i, // top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [RGBQUAD {
-                rgbBlue: 0,
-                rgbGreen: 0,
-                rgbRed: 0,
-                rgbReserved: 0,
-            }],
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbmp = CreateDIBSection(Some(hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0);
-        if hbmp.is_err() {
-            if !hdc_mem.is_invalid() {
-                let _ = DeleteDC(hdc_mem);
-            }
-            let _ = ReleaseDC(None, hdc_screen);
-            return;
-        }
-        let hbmp = hbmp.unwrap();
-        if !bits.is_null() {
-            let n = (width as usize * height as usize).min(pixels.len());
-            std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, bits as *mut u8, n * 4);
-        }
-        let h_old = SelectObject(hdc_mem, hbmp.into());
-
-        let alpha = ((opacity_pct.clamp(20, 100) * 255) / 100) as u8;
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: alpha,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let size_win = SIZE {
-            cx: width_i,
-            cy: height_i,
-        };
-        let pt_src = POINT { x: 0, y: 0 };
-
-        let _ = UpdateLayeredWindow(
-            hwnd,
-            Some(hdc_screen),
-            None, // keep current position
-            Some(&size_win as *const SIZE),
-            Some(hdc_mem),
-            Some(&pt_src as *const POINT),
-            COLORREF(0),
-            Some(&blend as *const BLENDFUNCTION),
-            ULW_ALPHA,
-        );
-
-        let _ = SelectObject(hdc_mem, h_old);
-        let _ = DeleteObject(hbmp.into());
-        let _ = DeleteDC(hdc_mem);
-        let _ = ReleaseDC(None, hdc_screen);
+    if let Some(mut surface) = Surface::new(width, height) {
+        surface.upload(hwnd, pixels, opacity_pct);
     }
 }
 
@@ -241,7 +370,7 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
     unsafe {
         let dim = GetSystemMetrics(SM_CXSMICON);
         let dim = if dim <= 0 { 16 } else { dim.min(32) } as u32;
-        let pixels = draw_overlay(dim, bg, dot, false, VisualStyle::Dot, 90);
+        let pixels = draw_overlay(dim, bg, dot, false, VisualStyle::Dot, 90, None);
 
         // Color bitmap (32bpp, top-down DIB -> HBITMAP)
         let hdc_screen = GetDC(None);

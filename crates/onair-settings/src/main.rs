@@ -12,10 +12,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use onair_config::{
-    compose_vm_param, looks_like_vm_param, parse_hex6, parse_macro_mode, parse_macro_script,
-    parse_menu_style, parse_strip_button, parse_trigger, parse_trigger_mode, parse_visual_style,
-    parse_vm_mode, update_config_file, AppConfig, ConfigKey, Macro, MacroMode, MacroOp, Trigger,
-    VM_BUTTONS,
+    compose_vm_param, format_level_channel, looks_like_vm_param, parse_hex6, parse_level_channel,
+    parse_macro_mode, parse_macro_script, parse_menu_style, parse_strip_button, parse_trigger,
+    parse_trigger_mode, parse_visual_style, parse_vm_mode, update_config_file, AppConfig,
+    ConfigKey, Macro, MacroMode, MacroOp, Trigger, VM_BUTTONS,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use windows::core::PCWSTR;
@@ -408,6 +408,10 @@ fn parse_u32(value: &str) -> Option<u32> {
     value.trim().parse().ok()
 }
 
+fn parse_i32(value: &str) -> Option<i32> {
+    value.trim().parse().ok()
+}
+
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -542,6 +546,40 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
                 .clamp(0, 100);
             ui.set_bg_opacity_value(n as i32);
             Ok(n.to_string())
+        }
+        ConfigKey::SpeakThresholdDb => {
+            let n = parse_i32(value)
+                .ok_or("Sensitivity must be a whole number in dB.")?
+                .clamp(-70, -20);
+            Ok(n.to_string())
+        }
+        ConfigKey::SpeakReleaseMs => {
+            let n = parse_u32(value)
+                .ok_or("Release time must be a whole number.")?
+                .clamp(100, 1500);
+            Ok(n.to_string())
+        }
+        ConfigKey::AnimFps => {
+            let n = parse_u32(value)
+                .ok_or("Animation FPS must be a whole number.")?
+                .clamp(10, 60);
+            Ok(n.to_string())
+        }
+        ConfigKey::WaveBars => {
+            let n = parse_u32(value)
+                .ok_or("Bar count must be a whole number.")?
+                .clamp(3, 9);
+            Ok(n.to_string())
+        }
+        ConfigKey::LevelType => {
+            let n = parse_u32(value)
+                .ok_or("Level type must be a whole number.")?
+                .min(3);
+            Ok(n.to_string())
+        }
+        ConfigKey::LevelChannel => {
+            let channel = parse_level_channel(value);
+            Ok(format_level_channel(channel))
         }
         ConfigKey::MenuStyle => {
             let style = parse_menu_style(value);

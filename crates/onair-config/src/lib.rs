@@ -118,6 +118,8 @@ pub enum VisualStyle {
     Bar,
     /// No bg, just a small filled dot (smallest footprint).
     Mini,
+    /// Rounded square bg + animated level bars (Voicemeeter input level).
+    Wave,
 }
 
 impl VisualStyle {
@@ -127,6 +129,7 @@ impl VisualStyle {
             VisualStyle::Ring => "ring",
             VisualStyle::Bar => "bar",
             VisualStyle::Mini => "mini",
+            VisualStyle::Wave => "wave",
         }
     }
 }
@@ -142,6 +145,7 @@ pub fn parse_visual_style(raw: &str) -> VisualStyle {
         "RING" | "CIRCLE" | "OUTLINE" | "DONUT" => VisualStyle::Ring,
         "BAR" | "STRIP" | "LINE" | "PILL" => VisualStyle::Bar,
         "MINI" | "MINIMAL" | "DOTONLY" | "SMALL" | "NOBG" => VisualStyle::Mini,
+        "WAVE" | "VOICE" | "SPEAKING" => VisualStyle::Wave,
         // "DOT", "CIRCLE-FILLED" and anything unknown -> Dot.
         _ => VisualStyle::Dot,
     }
@@ -696,6 +700,18 @@ pub struct AppConfig {
     pub hold_tap_ms: u32,
     pub visual_style: VisualStyle,
     pub bg_opacity: u32,
+    /// Wave style: level at or below this is silence (clamped -70..-20).
+    pub speak_threshold_db: i32,
+    /// Wave style: hangover before the animation stops (100..1500 ms).
+    pub speak_release_ms: u32,
+    /// Wave style animation rate (10..60 fps).
+    pub anim_fps: u32,
+    /// Number of animated bars (3..9).
+    pub wave_bars: u32,
+    /// Voicemeeter level type: 0 pre-fader, 1 post-fader, 2 post-mute, 3 output.
+    pub level_type: u32,
+    /// Manual input channel (left; right = +1). `None` = follow `vm_param`.
+    pub level_channel: Option<u32>,
     pub menu_style: MenuStyle,
     pub color_on: (u8, u8, u8),
     pub color_off: (u8, u8, u8),
@@ -726,6 +742,12 @@ impl Default for AppConfig {
             hold_tap_ms: 300,
             visual_style: VisualStyle::Dot,
             bg_opacity: 90,
+            speak_threshold_db: -45,
+            speak_release_ms: 300,
+            anim_fps: 30,
+            wave_bars: 5,
+            level_type: 0,
+            level_channel: None,
             menu_style: MenuStyle::Glass,
             color_on: (0x2E, 0xCC, 0x71),
             color_off: (0xE7, 0x4C, 0x3C),
@@ -742,6 +764,14 @@ impl AppConfig {
         self.poll_ms = self.poll_ms.clamp(30, 1000);
         self.hold_tap_ms = self.hold_tap_ms.clamp(100, 2000);
         self.bg_opacity = self.bg_opacity.clamp(0, 100);
+        self.speak_threshold_db = self.speak_threshold_db.clamp(-70, -20);
+        self.speak_release_ms = self.speak_release_ms.clamp(100, 1500);
+        self.anim_fps = self.anim_fps.clamp(10, 60);
+        self.wave_bars = self.wave_bars.clamp(3, 9);
+        self.level_type = self.level_type.min(3);
+        if let Some(channel) = self.level_channel {
+            self.level_channel = Some(channel.min(4095));
+        }
         if self.vm_param.trim().is_empty() {
             self.vm_param = "Strip[0].B2".to_string();
         }
@@ -915,6 +945,32 @@ impl AppConfig {
                         cfg.bg_opacity = n;
                     }
                 }
+                "speak_threshold_db" | "speak_threshold" => {
+                    if let Ok(n) = val.parse::<i32>() {
+                        cfg.speak_threshold_db = n;
+                    }
+                }
+                "speak_release_ms" | "speak_release" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.speak_release_ms = n;
+                    }
+                }
+                "anim_fps" | "wave_fps" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.anim_fps = n;
+                    }
+                }
+                "wave_bars" | "bars" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.wave_bars = n;
+                    }
+                }
+                "level_type" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.level_type = n;
+                    }
+                }
+                "level_channel" => cfg.level_channel = parse_level_channel(val),
                 "menu_style" | "tray_menu_style" | "menu" => cfg.menu_style = parse_menu_style(val),
                 "color_on" => {
                     if let Some(c) = parse_hex6(val) {
@@ -984,6 +1040,12 @@ impl AppConfig {
              hold_tap_ms={}\n\
              visual_style={}\n\
              bg_opacity={}\n\
+             speak_threshold_db={}\n\
+             speak_release_ms={}\n\
+             anim_fps={}\n\
+             wave_bars={}\n\
+             level_type={}\n\
+             level_channel={}\n\
              menu_style={}\n\
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
@@ -1006,6 +1068,12 @@ impl AppConfig {
             self.hold_tap_ms,
             self.visual_style.as_str(),
             self.bg_opacity,
+            self.speak_threshold_db,
+            self.speak_release_ms,
+            self.anim_fps,
+            self.wave_bars,
+            self.level_type,
+            format_level_channel(self.level_channel),
             self.menu_style.as_str(),
             self.color_on.0,
             self.color_on.1,
@@ -1117,6 +1185,12 @@ impl AppConfig {
             ConfigKey::HoldTapMs => self.hold_tap_ms.to_string(),
             ConfigKey::VisualStyle => self.visual_style.as_str().to_string(),
             ConfigKey::BgOpacity => self.bg_opacity.to_string(),
+            ConfigKey::SpeakThresholdDb => self.speak_threshold_db.to_string(),
+            ConfigKey::SpeakReleaseMs => self.speak_release_ms.to_string(),
+            ConfigKey::AnimFps => self.anim_fps.to_string(),
+            ConfigKey::WaveBars => self.wave_bars.to_string(),
+            ConfigKey::LevelType => self.level_type.to_string(),
+            ConfigKey::LevelChannel => format_level_channel(self.level_channel),
             ConfigKey::MenuStyle => self.menu_style.as_str().to_string(),
             ConfigKey::ColorOn => color_hex(self.color_on),
             ConfigKey::ColorOff => color_hex(self.color_off),
@@ -1249,6 +1323,23 @@ fn parse_bool(v: &str, fallback: bool) -> bool {
     }
 }
 
+/// `level_channel=auto` (or empty/unknown) means "follow vm_param". A number
+/// selects the left channel explicitly; the right channel is always +1.
+pub fn parse_level_channel(v: &str) -> Option<u32> {
+    let s = v.trim().to_ascii_lowercase();
+    if s.is_empty() || matches!(s.as_str(), "auto" | "default" | "none" | "off") {
+        return None;
+    }
+    s.parse::<u32>().ok()
+}
+
+pub fn format_level_channel(channel: Option<u32>) -> String {
+    match channel {
+        Some(v) => v.to_string(),
+        None => "auto".to_string(),
+    }
+}
+
 pub fn parse_hex6(v: &str) -> Option<(u8, u8, u8)> {
     let s = v.trim().trim_start_matches('#');
     // Slice by byte below; reject non-ASCII first so a 6-byte UTF-8
@@ -1349,6 +1440,12 @@ pub enum ConfigKey {
     HoldTapMs,
     VisualStyle,
     BgOpacity,
+    SpeakThresholdDb,
+    SpeakReleaseMs,
+    AnimFps,
+    WaveBars,
+    LevelType,
+    LevelChannel,
     MenuStyle,
     ColorOn,
     ColorOff,
@@ -1361,6 +1458,10 @@ const VM_PARAM_B_ALIASES: &[&str] = &["vm_param2", "vm_param_second"];
 const HOLD_TAP_ALIASES: &[&str] = &["hold_ms", "tap_ms"];
 const VISUAL_STYLE_ALIASES: &[&str] = &["visual", "style"];
 const BG_OPACITY_ALIASES: &[&str] = &["bg_alpha", "background_opacity"];
+const SPEAK_THRESHOLD_ALIASES: &[&str] = &["speak_threshold"];
+const SPEAK_RELEASE_ALIASES: &[&str] = &["speak_release"];
+const ANIM_FPS_ALIASES: &[&str] = &["wave_fps"];
+const WAVE_BARS_ALIASES: &[&str] = &["bars"];
 const MENU_STYLE_ALIASES: &[&str] = &["tray_menu_style", "menu"];
 
 impl ConfigKey {
@@ -1384,6 +1485,12 @@ impl ConfigKey {
             ConfigKey::HoldTapMs => "hold_tap_ms",
             ConfigKey::VisualStyle => "visual_style",
             ConfigKey::BgOpacity => "bg_opacity",
+            ConfigKey::SpeakThresholdDb => "speak_threshold_db",
+            ConfigKey::SpeakReleaseMs => "speak_release_ms",
+            ConfigKey::AnimFps => "anim_fps",
+            ConfigKey::WaveBars => "wave_bars",
+            ConfigKey::LevelType => "level_type",
+            ConfigKey::LevelChannel => "level_channel",
             ConfigKey::MenuStyle => "menu_style",
             ConfigKey::ColorOn => "color_on",
             ConfigKey::ColorOff => "color_off",
@@ -1400,6 +1507,10 @@ impl ConfigKey {
             ConfigKey::HoldTapMs => HOLD_TAP_ALIASES,
             ConfigKey::VisualStyle => VISUAL_STYLE_ALIASES,
             ConfigKey::BgOpacity => BG_OPACITY_ALIASES,
+            ConfigKey::SpeakThresholdDb => SPEAK_THRESHOLD_ALIASES,
+            ConfigKey::SpeakReleaseMs => SPEAK_RELEASE_ALIASES,
+            ConfigKey::AnimFps => ANIM_FPS_ALIASES,
+            ConfigKey::WaveBars => WAVE_BARS_ALIASES,
             ConfigKey::MenuStyle => MENU_STYLE_ALIASES,
             _ => &[],
         }
@@ -1407,7 +1518,7 @@ impl ConfigKey {
 
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
-        const ALL: [ConfigKey; 23] = [
+        const ALL: [ConfigKey; 29] = [
             ConfigKey::X,
             ConfigKey::Y,
             ConfigKey::Size,
@@ -1426,6 +1537,12 @@ impl ConfigKey {
             ConfigKey::HoldTapMs,
             ConfigKey::VisualStyle,
             ConfigKey::BgOpacity,
+            ConfigKey::SpeakThresholdDb,
+            ConfigKey::SpeakReleaseMs,
+            ConfigKey::AnimFps,
+            ConfigKey::WaveBars,
+            ConfigKey::LevelType,
+            ConfigKey::LevelChannel,
             ConfigKey::MenuStyle,
             ConfigKey::ColorOn,
             ConfigKey::ColorOff,
@@ -1760,12 +1877,16 @@ mod tests {
         assert_eq!(parse_visual_style("pill"), VisualStyle::Bar);
         assert_eq!(parse_visual_style("mini"), VisualStyle::Mini);
         assert_eq!(parse_visual_style("minimal"), VisualStyle::Mini);
+        assert_eq!(parse_visual_style("wave"), VisualStyle::Wave);
+        assert_eq!(parse_visual_style("VOICE"), VisualStyle::Wave);
+        assert_eq!(parse_visual_style("speaking"), VisualStyle::Wave);
         assert_eq!(parse_visual_style(""), VisualStyle::Dot);
         assert_eq!(parse_visual_style("garbage"), VisualStyle::Dot);
         assert_eq!(VisualStyle::Dot.as_str(), "dot");
         assert_eq!(VisualStyle::Ring.as_str(), "ring");
         assert_eq!(VisualStyle::Bar.as_str(), "bar");
         assert_eq!(VisualStyle::Mini.as_str(), "mini");
+        assert_eq!(VisualStyle::Wave.as_str(), "wave");
     }
 
     #[test]
@@ -1925,6 +2046,117 @@ mod tests {
         cfg.bg_opacity = 500;
         cfg.clamp();
         assert_eq!(cfg.bg_opacity, 100);
+    }
+
+    #[test]
+    fn wave_defaults_and_clamps() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.speak_threshold_db, -45);
+        assert_eq!(cfg.speak_release_ms, 300);
+        assert_eq!(cfg.anim_fps, 30);
+        assert_eq!(cfg.wave_bars, 5);
+        assert_eq!(cfg.level_type, 0);
+        assert_eq!(cfg.level_channel, None);
+
+        let mut cfg = AppConfig {
+            speak_threshold_db: -100,
+            speak_release_ms: 0,
+            anim_fps: 999,
+            wave_bars: 1,
+            level_type: 9,
+            level_channel: Some(99_999),
+            ..Default::default()
+        };
+        cfg.clamp();
+        assert_eq!(cfg.speak_threshold_db, -70);
+        assert_eq!(cfg.speak_release_ms, 100);
+        assert_eq!(cfg.anim_fps, 60);
+        assert_eq!(cfg.wave_bars, 3);
+        assert_eq!(cfg.level_type, 3);
+        assert_eq!(cfg.level_channel, Some(4095));
+
+        let mut cfg = AppConfig {
+            speak_threshold_db: 0,
+            speak_release_ms: 99_999,
+            anim_fps: 0,
+            wave_bars: 99,
+            ..Default::default()
+        };
+        cfg.clamp();
+        assert_eq!(cfg.speak_threshold_db, -20);
+        assert_eq!(cfg.speak_release_ms, 1500);
+        assert_eq!(cfg.anim_fps, 10);
+        assert_eq!(cfg.wave_bars, 9);
+    }
+
+    #[test]
+    fn wave_keys_parse_aliases_and_invalid_values_fall_back() {
+        let cfg = AppConfig::parse(
+            "visual_style=voice\n\
+             speak_threshold=-55\n\
+             speak_release_ms=500\n\
+             wave_fps=45\n\
+             bars=7\n\
+             level_type=2\n\
+             level_channel=8\n",
+        );
+        assert_eq!(cfg.visual_style, VisualStyle::Wave);
+        assert_eq!(cfg.speak_threshold_db, -55);
+        assert_eq!(cfg.speak_release_ms, 500);
+        assert_eq!(cfg.anim_fps, 45);
+        assert_eq!(cfg.wave_bars, 7);
+        assert_eq!(cfg.level_type, 2);
+        assert_eq!(cfg.level_channel, Some(8));
+
+        // Unknown / malformed values keep the defaults instead of failing.
+        let cfg = AppConfig::parse(
+            "speak_threshold_db=loud\n\
+             speak_release_ms=-2\n\
+             anim_fps=fast\n\
+             wave_bars=\n\
+             level_type=x\n\
+             level_channel=left\n",
+        );
+        assert_eq!(cfg.speak_threshold_db, -45);
+        assert_eq!(cfg.speak_release_ms, 300);
+        assert_eq!(cfg.anim_fps, 30);
+        assert_eq!(cfg.wave_bars, 5);
+        assert_eq!(cfg.level_type, 0);
+        assert_eq!(cfg.level_channel, None);
+    }
+
+    #[test]
+    fn level_channel_auto_and_number_roundtrip() {
+        assert_eq!(parse_level_channel("auto"), None);
+        assert_eq!(parse_level_channel("AUTO"), None);
+        assert_eq!(parse_level_channel("none"), None);
+        assert_eq!(parse_level_channel(""), None);
+        assert_eq!(parse_level_channel(" 4 "), Some(4));
+        assert_eq!(parse_level_channel("left"), None);
+        assert_eq!(format_level_channel(None), "auto");
+        assert_eq!(format_level_channel(Some(6)), "6");
+
+        let mut cfg = AppConfig {
+            level_channel: Some(12),
+            ..Default::default()
+        };
+        cfg.macros.clear();
+        let path = temp_config_path("wave-roundtrip");
+        cfg.write_full(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("level_channel=12\n"), "text was: {text}");
+        assert!(text.contains("visual_style=dot\n"), "text was: {text}");
+        let loaded = AppConfig::parse(&text);
+        assert_eq!(loaded.level_channel, Some(12));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let defaults = AppConfig::default();
+        let path = temp_config_path("wave-auto");
+        defaults.write_full(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("level_channel=auto\n"), "text was: {text}");
+        assert_eq!(AppConfig::parse(&text).level_channel, None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

@@ -1,9 +1,9 @@
-use windows::core::PCWSTR;
+﻿use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::config::{AppConfig, VmMode};
+use crate::config::{AppConfig, VisualStyle, VmMode};
 use crate::vm::MicState;
 use crate::window::{to_wide, WM_TRAY};
 
@@ -14,39 +14,59 @@ pub const ID_SETTINGS: u32 = 1002;
 pub const ID_VISIBLE: u32 = 1003;
 pub const ID_QUIT: u32 = 1502;
 
+// Visual styles.
+pub const ID_STYLE_DOT: u32 = 1100;
+pub const ID_STYLE_RING: u32 = 1101;
+pub const ID_STYLE_BAR: u32 = 1102;
+pub const ID_STYLE_MINI: u32 = 1103;
+pub const ID_STYLE_WAVE: u32 = 1104;
+// Wave tuning.
+pub const ID_WAVE_SENS_35: u32 = 1110;
+pub const ID_WAVE_SENS_40: u32 = 1111;
+pub const ID_WAVE_SENS_45: u32 = 1112;
+pub const ID_WAVE_SENS_50: u32 = 1113;
+pub const ID_WAVE_SENS_55: u32 = 1114;
+pub const ID_WAVE_BARS_3: u32 = 1120;
+pub const ID_WAVE_BARS_5: u32 = 1121;
+pub const ID_WAVE_BARS_7: u32 = 1122;
+pub const ID_WAVE_FPS_20: u32 = 1130;
+pub const ID_WAVE_FPS_30: u32 = 1131;
+pub const ID_WAVE_FPS_45: u32 = 1132;
+
 const TRAY_UID: u32 = 1;
 
 /// Presentation-independent description of the tray menu. Both the native
 /// menu and the custom glass menu are built from this model, so checks and
 /// ordering cannot drift apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Item {
     Action {
         id: u32,
-        label: String,
+        label: &'static str,
     },
     Check {
         id: u32,
-        label: String,
+        label: &'static str,
         checked: bool,
+    },
+    Submenu {
+        label: &'static str,
+        items: Vec<Item>,
     },
     Separator,
 }
 
 impl Item {
-    fn action(id: u32, label: impl Into<String>) -> Self {
-        Item::Action {
-            id,
-            label: label.into(),
-        }
+    fn action(id: u32, label: &'static str) -> Self {
+        Item::Action { id, label }
     }
 
-    fn check(id: u32, label: impl Into<String>, checked: bool) -> Self {
-        Item::Check {
-            id,
-            label: label.into(),
-            checked,
-        }
+    fn check(id: u32, label: &'static str, checked: bool) -> Self {
+        Item::Check { id, label, checked }
+    }
+
+    fn submenu(label: &'static str, items: Vec<Item>) -> Self {
+        Item::Submenu { label, items }
     }
 }
 
@@ -54,9 +74,60 @@ impl Item {
 ///
 /// Everything else lives in the onair-settings window; the tray menu stays
 /// minimal so right-click is a quick stop, not a control panel.
+#[inline(never)]
 pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
+    let style = |s: VisualStyle| cfg.visual_style == s;
     vec![
         Item::action(ID_SETTINGS, "Settings..."),
+        Item::Separator,
+        Item::submenu(
+            "Visual",
+            vec![
+                Item::check(ID_STYLE_DOT, "Dot", style(VisualStyle::Dot)),
+                Item::check(ID_STYLE_RING, "Ring", style(VisualStyle::Ring)),
+                Item::check(ID_STYLE_BAR, "Bar", style(VisualStyle::Bar)),
+                Item::check(ID_STYLE_MINI, "Mini", style(VisualStyle::Mini)),
+                Item::check(ID_STYLE_WAVE, "Wave", style(VisualStyle::Wave)),
+            ],
+        ),
+        Item::submenu(
+            "Wave",
+            vec![
+                Item::check(
+                    ID_WAVE_SENS_35,
+                    "Sensitivity -35 dB",
+                    cfg.speak_threshold_db == -35,
+                ),
+                Item::check(
+                    ID_WAVE_SENS_40,
+                    "Sensitivity -40 dB",
+                    cfg.speak_threshold_db == -40,
+                ),
+                Item::check(
+                    ID_WAVE_SENS_45,
+                    "Sensitivity -45 dB",
+                    cfg.speak_threshold_db == -45,
+                ),
+                Item::check(
+                    ID_WAVE_SENS_50,
+                    "Sensitivity -50 dB",
+                    cfg.speak_threshold_db == -50,
+                ),
+                Item::check(
+                    ID_WAVE_SENS_55,
+                    "Sensitivity -55 dB",
+                    cfg.speak_threshold_db == -55,
+                ),
+                Item::Separator,
+                Item::check(ID_WAVE_BARS_3, "3 bars", cfg.wave_bars == 3),
+                Item::check(ID_WAVE_BARS_5, "5 bars", cfg.wave_bars == 5),
+                Item::check(ID_WAVE_BARS_7, "7 bars", cfg.wave_bars == 7),
+                Item::Separator,
+                Item::check(ID_WAVE_FPS_20, "20 FPS", cfg.anim_fps == 20),
+                Item::check(ID_WAVE_FPS_30, "30 FPS", cfg.anim_fps == 30),
+                Item::check(ID_WAVE_FPS_45, "45 FPS", cfg.anim_fps == 45),
+            ],
+        ),
         Item::Separator,
         Item::check(ID_LOCK, "Lock position", cfg.locked),
         Item::check(ID_TOPMOST, "Always on top", cfg.always_on_top),
@@ -210,6 +281,19 @@ fn append_items(hmenu: HMENU, items: &[Item]) {
                 };
                 append_text(hmenu, *id, label, flags);
             }
+            Item::Submenu { label, items } => unsafe {
+                let Ok(sub) = CreatePopupMenu() else {
+                    continue;
+                };
+                append_items(sub, items);
+                let w = to_wide(label);
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_POPUP | MF_STRING,
+                    sub.0 as usize,
+                    PCWSTR(w.as_ptr()),
+                );
+            },
             Item::Separator => unsafe {
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
             },
@@ -290,53 +374,136 @@ mod tests {
     use super::*;
 
     #[test]
-    fn menu_model_is_minimal_and_ordered() {
+    fn menu_model_has_visual_and_wave_submenus() {
         let cfg = AppConfig {
             locked: true,
             always_on_top: false,
             overlay_visible: false,
+            visual_style: VisualStyle::Wave,
+            speak_threshold_db: -50,
+            wave_bars: 7,
+            anim_fps: 45,
             ..Default::default()
         };
         let model = build_model(&cfg);
-        assert_eq!(
-            model,
-            vec![
-                Item::Action {
-                    id: ID_SETTINGS,
-                    label: "Settings...".into()
-                },
-                Item::Separator,
-                Item::Check {
-                    id: ID_LOCK,
-                    label: "Lock position".into(),
-                    checked: true
-                },
-                Item::Check {
-                    id: ID_TOPMOST,
-                    label: "Always on top".into(),
-                    checked: false
-                },
-                Item::Check {
-                    id: ID_VISIBLE,
-                    label: "Show overlay".into(),
-                    checked: false
-                },
-                Item::Separator,
-                Item::Action {
-                    id: ID_QUIT,
-                    label: "Quit".into()
-                },
-            ]
-        );
+        assert!(matches!(
+            &model[0],
+            Item::Action {
+                id: ID_SETTINGS,
+                ..
+            }
+        ));
+        let Item::Submenu {
+            label: visual,
+            items: styles,
+        } = &model[2]
+        else {
+            panic!("Visual submenu missing");
+        };
+        assert_eq!(*visual, "Visual");
+        assert!(matches!(
+            &styles[4],
+            Item::Check {
+                id: ID_STYLE_WAVE,
+                checked: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &styles[0],
+            Item::Check {
+                id: ID_STYLE_DOT,
+                checked: false,
+                ..
+            }
+        ));
+
+        let Item::Submenu {
+            label: wave,
+            items: tuning,
+        } = &model[3]
+        else {
+            panic!("Wave submenu missing");
+        };
+        assert_eq!(*wave, "Wave");
+        let checked = |id: u32| {
+            tuning.iter().any(|item| {
+                matches!(
+                    item,
+                    Item::Check {
+                        id: item_id,
+                        checked: true,
+                        ..
+                    } if *item_id == id
+                )
+            })
+        };
+        assert!(checked(ID_WAVE_SENS_50));
+        assert!(checked(ID_WAVE_BARS_7));
+        assert!(checked(ID_WAVE_FPS_45));
+
+        assert!(matches!(
+            &model[5],
+            Item::Check {
+                id: ID_LOCK,
+                checked: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &model[6],
+            Item::Check {
+                id: ID_TOPMOST,
+                checked: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &model[7],
+            Item::Check {
+                id: ID_VISIBLE,
+                checked: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            model.last(),
+            Some(Item::Action { id: ID_QUIT, .. })
+        ));
     }
 
     #[test]
-    fn menu_model_has_no_submenus() {
+    fn menu_model_defaults_check_dot_and_default_wave_tuning() {
         let model = build_model(&AppConfig::default());
-        assert!(model.iter().all(|item| matches!(
-            item,
-            Item::Action { .. } | Item::Check { .. } | Item::Separator
-        )));
+        let Item::Submenu { items: styles, .. } = &model[2] else {
+            panic!("Visual submenu missing");
+        };
+        assert!(matches!(
+            &styles[0],
+            Item::Check {
+                id: ID_STYLE_DOT,
+                checked: true,
+                ..
+            }
+        ));
+        let Item::Submenu { items: tuning, .. } = &model[3] else {
+            panic!("Wave submenu missing");
+        };
+        let checked = |id: u32| {
+            tuning.iter().any(|item| {
+                matches!(
+                    item,
+                    Item::Check {
+                        id: item_id,
+                        checked: true,
+                        ..
+                    } if *item_id == id
+                )
+            })
+        };
+        assert!(checked(ID_WAVE_SENS_45));
+        assert!(checked(ID_WAVE_BARS_5));
+        assert!(checked(ID_WAVE_FPS_30));
     }
 
     #[test]

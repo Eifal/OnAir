@@ -14,6 +14,8 @@ pub const WM_KEY_DOWN: u32 = 1024 + 4; // WM_APP + 4, trigger pressed
 /// wparam = action id, as above.
 pub const WM_KEY_UP: u32 = 1024 + 5; // WM_APP + 5, trigger released
 pub const TIMER_POLL: usize = 1;
+/// Wave animation timer. Only alive while the wave style is speaking.
+pub const TIMER_ANIM: usize = 2;
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
