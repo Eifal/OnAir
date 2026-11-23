@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Card, ColorField, PreviewPanel, RowSlider, SettingBlock, VisualCard } from "components.slint";
+import { Card, ColorField, PreviewPanel, RowSlider, RowSwitch, SettingBlock, VisualCard } from "components.slint";
 
 export component AppearancePage inherits Rectangle {
     in property <int> size-value: 48;
@@ -9,14 +9,18 @@ export component AppearancePage inherits Rectangle {
     in-out property <string> color-off: "E74C3C";
     in-out property <string> color-unknown: "808080";
     in-out property <string> color-bg: "141414";
+    in-out property <string> color-mute: "E74C3C";
+    in-out property <bool> mute-indicator: true;
     in property <bool> color-on-invalid: false;
     in property <bool> color-off-invalid: false;
     in property <bool> color-unknown-invalid: false;
     in property <bool> color-bg-invalid: false;
+    in property <bool> color-mute-invalid: false;
     in property <color> preview-color-on: #2ECC71;
     in property <color> preview-color-off: #E74C3C;
     in property <color> preview-color-unknown: #808080;
     in property <color> preview-color-bg: #141414;
+    in property <color> preview-color-mute: #E74C3C;
     callback apply-now(string, string);
     callback apply-later(string, string);
     callback open-picker(string);
@@ -62,6 +66,7 @@ export component AppearancePage inherits Rectangle {
                 color-off: root.preview-color-off;
                 color-unknown: root.preview-color-unknown;
                 color-bg: root.preview-color-bg;
+                color-mute: root.preview-color-mute;
                 state-changed(s) => { root.preview-state = s; }
             }
 
@@ -162,6 +167,36 @@ export component AppearancePage inherits Rectangle {
                     edited(t) => { root.apply-later("color_unknown", t); }
                     accepted(t) => { root.apply-now("color_unknown", t); }
                     pick => { root.open-picker("color_unknown"); }
+                }
+            }
+        }
+
+        Card {
+            title: "Mute indicator";
+            subtitle: "Replaces the overlay with a mute sign while the Voicemeeter strip is muted.";
+
+            RowSwitch {
+                title: "Show mute indicator";
+                description: "Reads Strip[n].Mute for the strip in the Voicemeeter parameter.";
+                checked <=> root.mute-indicator;
+                toggled(v) => { root.apply-now("mute_indicator", v ? "true" : "false"); }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                spacing: 12px;
+                cross-axis-alignment: center;
+                SettingBlock {
+                    title: "Mute color";
+                    description: "Colour of the ring and slash.";
+                }
+                ColorField {
+                    width: 164px;
+                    text <=> root.color-mute;
+                    swatch: root.preview-color-mute;
+                    invalid: root.color-mute-invalid;
+                    edited(t) => { root.apply-later("color_mute", t); }
+                    accepted(t) => { root.apply-now("color_mute", t); }
+                    pick => { root.open-picker("color_mute"); }
                 }
             }
         }

@@ -520,6 +520,28 @@ pub fn strip_channels(strip: u32, edition: i32) -> Option<(u32, u32)> {
     }
 }
 
+/// Parameter name for the strip's mute button, e.g. `Strip[0].Mute`.
+pub fn mute_param(strip: u32) -> String {
+    format!("Strip[{strip}].Mute")
+}
+
+impl VmClient {
+    /// Mute state of a strip, read from `Strip[n].Mute`. Returns `None` when
+    /// Voicemeeter is not logged in or the parameter cannot be read.
+    pub fn strip_muted(&mut self, strip: u32) -> Option<bool> {
+        if !self.logged_in {
+            return None;
+        }
+        let f_get = self.f_get?;
+        let mut name = Self::ansi_param(&mute_param(strip));
+        let mut val: f32 = 0.0;
+        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+            return None;
+        }
+        Some(val >= 0.5)
+    }
+}
+
 /// Locate VoicemeeterRemote64.dll via registry, fallback to default path.
 pub fn find_dll_path() -> Option<String> {
     // Registry: HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\VB:Voicemeeter {17359A74-1236-5467}
@@ -626,6 +648,13 @@ mod tests {
         assert_eq!(strip_index(" Bus[0].Mute"), None);
         assert_eq!(strip_index("Strip[x].B2"), None);
         assert_eq!(strip_index("MacroButton[0].Trigger"), None);
+    }
+
+    #[test]
+    fn mute_param_targets_the_strip_mute_button() {
+        assert_eq!(mute_param(0), "Strip[0].Mute");
+        assert_eq!(mute_param(7), "Strip[7].Mute");
+        assert_eq!(strip_index(&mute_param(3)), Some(3));
     }
 
     #[test]

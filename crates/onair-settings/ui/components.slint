@@ -1068,7 +1068,9 @@ export component OverlayGlyph inherits Rectangle {
     in property <color> color-off: #E74C3C;
     in property <color> color-unknown: #808080;
     in property <color> color-bg: #141414;
+    in property <color> color-mute: #E74C3C;
     in property <int> state: 0;
+    in property <bool> muted: false;
 
     width: root.glyph-size;
     height: root.glyph-size;
@@ -1088,7 +1090,7 @@ export component OverlayGlyph inherits Rectangle {
         opacity: root.level;
     }
 
-    if root.visual-style == "dot": Rectangle {
+    if root.visual-style == "dot" && !root.muted: Rectangle {
         width: root.glyph-size * 0.5;
         height: root.glyph-size * 0.5;
         x: (root.glyph-size - self.width) / 2;
@@ -1096,7 +1098,7 @@ export component OverlayGlyph inherits Rectangle {
         border-radius: self.width / 2;
         background: root.state-color;
     }
-    if root.visual-style == "ring": Rectangle {
+    if root.visual-style == "ring" && !root.muted: Rectangle {
         width: root.glyph-size * 0.52;
         height: root.glyph-size * 0.52;
         x: (root.glyph-size - self.width) / 2;
@@ -1106,7 +1108,7 @@ export component OverlayGlyph inherits Rectangle {
         border-width: max(2px, root.glyph-size * 0.06);
         border-color: root.state-color;
     }
-    if root.visual-style == "bar": Rectangle {
+    if root.visual-style == "bar" && !root.muted: Rectangle {
         width: root.glyph-size * 0.7;
         height: max(3px, root.glyph-size * 0.08);
         x: (root.glyph-size - self.width) / 2;
@@ -1114,7 +1116,7 @@ export component OverlayGlyph inherits Rectangle {
         border-radius: self.height / 2;
         background: root.state-color;
     }
-    if root.visual-style == "mini": Rectangle {
+    if root.visual-style == "mini" && !root.muted: Rectangle {
         width: root.glyph-size * 0.55;
         height: root.glyph-size * 0.55;
         x: (root.glyph-size - self.width) / 2;
@@ -1123,7 +1125,7 @@ export component OverlayGlyph inherits Rectangle {
         background: root.state-color;
     }
     // Illustrative wave: five capsule bars, gap == bar width, centred.
-    if root.visual-style == "wave": Rectangle {
+    if root.visual-style == "wave" && !root.muted: Rectangle {
         width: 100%;
         height: 100%;
         background: transparent;
@@ -1134,6 +1136,32 @@ export component OverlayGlyph inherits Rectangle {
             y: (root.glyph-size - self.height) / 2;
             border-radius: self.width / 2;
             background: root.state-color;
+        }
+    }
+    // Mute sign: ring + diagonal slash, replaces the style while muted.
+    if root.muted: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+
+        Rectangle {
+            width: root.glyph-size * 0.6;
+            height: self.width;
+            x: (root.glyph-size - self.width) / 2;
+            y: (root.glyph-size - self.height) / 2;
+            border-radius: self.width / 2;
+            background: transparent;
+            border-width: max(2px, root.glyph-size * 0.11);
+            border-color: root.color-mute;
+        }
+        Rectangle {
+            width: root.glyph-size * 0.47;
+            height: max(2px, root.glyph-size * 0.11);
+            x: (root.glyph-size - self.width) / 2;
+            y: (root.glyph-size - self.height) / 2;
+            border-radius: self.height / 2;
+            background: root.color-mute;
+            transform-rotation: -45deg;
         }
     }
 }
@@ -1211,6 +1239,7 @@ export component PreviewPanel inherits Rectangle {
     in property <color> color-off: #E74C3C;
     in property <color> color-unknown: #808080;
     in property <color> color-bg: #141414;
+    in property <color> color-mute: #E74C3C;
     callback state-changed(int);
 
     height: 214px;
@@ -1264,6 +1293,8 @@ export component PreviewPanel inherits Rectangle {
         color-off: root.color-off;
         color-unknown: root.color-unknown;
         color-bg: root.color-bg;
+        color-mute: root.color-mute;
+        muted: root.state == 3;
     }
 
     HorizontalLayout {
@@ -1272,9 +1303,9 @@ export component PreviewPanel inherits Rectangle {
         spacing: 6px;
         height: 26px;
 
-        for name[idx] in ["On", "Off", "Unknown"]: Rectangle {
+        for name[idx] in ["On", "Off", "Unknown", "Mute"]: Rectangle {
             height: 24px;
-            width: 58px;
+            width: 52px;
             border-radius: 6px;
             background: idx == root.state ? Theme.surface-raised : Theme.preview-desk;
             border-width: 1px;

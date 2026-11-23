@@ -1,4 +1,4 @@
-﻿use windows::core::PCWSTR;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -12,6 +12,7 @@ pub const ID_LOCK: u32 = 1000;
 pub const ID_TOPMOST: u32 = 1001;
 pub const ID_SETTINGS: u32 = 1002;
 pub const ID_VISIBLE: u32 = 1003;
+pub const ID_MUTE_IND: u32 = 1004;
 pub const ID_QUIT: u32 = 1502;
 
 // Visual styles.
@@ -132,6 +133,7 @@ pub fn build_model(cfg: &AppConfig) -> Vec<Item> {
         Item::check(ID_LOCK, "Lock position", cfg.locked),
         Item::check(ID_TOPMOST, "Always on top", cfg.always_on_top),
         Item::check(ID_VISIBLE, "Show overlay", cfg.overlay_visible),
+        Item::check(ID_MUTE_IND, "Mute indicator", cfg.mute_indicator),
         Item::Separator,
         Item::action(ID_QUIT, "Quit"),
     ]
@@ -192,7 +194,7 @@ pub fn remove_tray(hwnd: HWND) {
     }
 }
 
-pub fn tooltip_text(cfg: &AppConfig, state: &MicState) -> String {
+pub fn tooltip_text(cfg: &AppConfig, state: &MicState, muted: bool) -> String {
     // The dot always tracks the primary parameter; the suffix makes the
     // action mode visible without trying to fit both parameters.
     let suffix = if cfg.vm_mode == VmMode::Switch {
@@ -200,9 +202,10 @@ pub fn tooltip_text(cfg: &AppConfig, state: &MicState) -> String {
     } else {
         ""
     };
+    let mute = if muted { " (muted)" } else { "" };
     match state {
-        MicState::On => format!("OnAir: {} ON{}", cfg.vm_param, suffix),
-        MicState::Off => format!("OnAir: {} OFF{}", cfg.vm_param, suffix),
+        MicState::On => format!("OnAir: {} ON{}{}", cfg.vm_param, mute, suffix),
+        MicState::Off => format!("OnAir: {} OFF{}{}", cfg.vm_param, mute, suffix),
         MicState::Unknown(reason) => {
             if reason == "Voicemeeter not running" || reason == "Voicemeeter not installed" {
                 "OnAir: Voicemeeter not running".to_string()
@@ -467,6 +470,14 @@ mod tests {
             }
         ));
         assert!(matches!(
+            &model[8],
+            Item::Check {
+                id: ID_MUTE_IND,
+                checked: true,
+                ..
+            }
+        ));
+        assert!(matches!(
             model.last(),
             Some(Item::Action { id: ID_QUIT, .. })
         ));
@@ -509,11 +520,14 @@ mod tests {
     #[test]
     fn switch_tooltip_mentions_mode() {
         let mut cfg = AppConfig::default();
-        let tip = tooltip_text(&cfg, &MicState::On);
+        let tip = tooltip_text(&cfg, &MicState::On, false);
         assert_eq!(tip, "OnAir: Strip[0].B2 ON");
 
         cfg.vm_mode = VmMode::Switch;
-        let tip = tooltip_text(&cfg, &MicState::Off);
+        let tip = tooltip_text(&cfg, &MicState::Off, false);
         assert_eq!(tip, "OnAir: Strip[0].B2 OFF (A/B switch)");
+
+        let tip = tooltip_text(&cfg, &MicState::On, true);
+        assert_eq!(tip, "OnAir: Strip[0].B2 ON (muted) (A/B switch)");
     }
 }

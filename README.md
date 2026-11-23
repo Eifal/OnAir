@@ -75,6 +75,7 @@ Right-click the tray icon. Left click (or double-click) opens
 - Lock position (checkmark)
 - Always on top (checkmark, re-asserted ~every 2 s)
 - Show overlay (checkmark)
+- Mute indicator (checkmark)
 - Quit
 
 The **Visual** and **Wave** submenus change the running overlay
@@ -106,6 +107,7 @@ Pages:
   colours (on/off/unknown/background) with hex validation or a click-to-open
   HSV colour wheel (hue/saturation disc + value slider, Reset to defaults),
   and a live on-screen preview with a pulse animation.
+- **Appearance → Mute indicator** – toggle the mute sign and pick its colour.
 - **Voicemeeter** – toggle vs two-button switch mode, primary/secondary
   parameter with strip/button dropdowns or a raw "Custom" value, invert,
   poll interval.
@@ -152,6 +154,8 @@ anim_fps=30
 wave_bars=5
 level_type=0
 level_channel=auto
+mute_indicator=true
+color_mute=E74C3C
 menu_style=glass
 color_on=2ECC71
 color_off=E74C3C
@@ -222,6 +226,23 @@ The wave reads the level of the strip in `vm_param` (`Strip[n].…`):
 The renderer reuses one pixel buffer and one DIB per size, so an active
 30 FPS 48 px overlay stays well below ~1.5 % of one core and allocates
 nothing per frame.
+
+## Mute indicator
+
+When Voicemeeter mutes the strip used by `vm_param` (`Strip[n].Mute`), the
+overlay is replaced by a prohibition sign (ring + diagonal slash) so a muted
+microphone is obvious even while the on-air button is still ON. Unmuting
+restores the configured style and, for Wave, resumes the animation.
+
+- `mute_indicator` (`true`/`false`, default `true`, aliases `show_mute`,
+  `mute_badge`) enables the replacement. Tray → **Mute indicator** and
+  Settings → **Appearance** toggle it.
+- `color_mute` (default `E74C3C`, alias `mute_color`) is the ring/slash
+  colour; the background keeps the normal `color_bg` and `bg_opacity`.
+- The mute state is read on every poll (`poll_ms`), so it reacts within one
+  tick. A `vm_param` that is not a `Strip[n]` parameter has no mute state and
+  keeps the normal overlay.
+- The tray icon stays Dot; the tooltip appends `(muted)` while muted.
 
 ## Background transparency (`bg_opacity`)
 

@@ -38,12 +38,16 @@ pub fn draw_overlay(
     wave: Option<WaveView>,
 ) -> Vec<u32> {
     let mut px = vec![0u32; (size as usize) * (size as usize)];
-    draw_overlay_into(&mut px, size, bg, dot, unlocked, style, bg_opacity, wave);
+    draw_overlay_into(
+        &mut px, size, bg, dot, unlocked, style, bg_opacity, wave, None,
+    );
     px
 }
 
 /// Same as `draw_overlay`, but writes into a caller-owned buffer so the
 /// animation can reuse one allocation for the lifetime of the process.
+/// `mute` replaces the style glyph with a prohibition sign in that colour
+/// (used while the Voicemeeter strip is muted).
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub fn draw_overlay_into(
@@ -55,6 +59,7 @@ pub fn draw_overlay_into(
     style: VisualStyle,
     bg_opacity: u32,
     wave: Option<WaveView>,
+    mute: Option<(u8, u8, u8)>,
 ) -> bool {
     let needed = (size as usize) * (size as usize);
     if size == 0 || px.len() < needed {
@@ -120,49 +125,54 @@ pub fn draw_overlay_into(
             let dy = fy - half;
             let dist_center = (dx * dx + dy * dy).sqrt();
 
-            // Foreground coverage by style.
-            let fg_cov = match style {
-                VisualStyle::Dot => {
-                    let dot_r = s * 0.40; // diameter 80%
-                    (0.5 - (dist_center - dot_r)).clamp(0.0, 1.0)
-                }
-                VisualStyle::Ring => {
-                    // Ring: outer ~80% diameter, thickness ~10% of size.
-                    let r_mid = s * 0.35;
-                    let half_thick = s * 0.05;
-                    (half_thick + 0.5 - (dist_center - r_mid).abs()).clamp(0.0, 1.0)
-                }
-                VisualStyle::Bar => {
-                    // Rounded bar SDF.
-                    let bqx = (fx - bar_cx).abs() - (bar_hw - bar_r);
-                    let bqy = (fy - bar_cy).abs() - (bar_hh - bar_r);
-                    let bax = bqx.max(0.0);
-                    let bay = bqy.max(0.0);
-                    let b_out = (bax * bax + bay * bay).sqrt();
-                    let b_in = bqx.max(bqy).min(0.0);
-                    let dist_bar = b_out + b_in - bar_r;
-                    (0.5 - dist_bar).clamp(0.0, 1.0)
-                }
-                VisualStyle::Mini => {
-                    let mini_r = s * 0.27; // diameter ~54%
-                    (0.5 - (dist_center - mini_r)).clamp(0.0, 1.0)
-                }
-                VisualStyle::Wave => {
-                    // Capsule (vertical segment + radius) per bar; take the
-                    // closest bar so adjacent capsules blend smoothly.
-                    let mut cov = 0.0f32;
-                    let cap_r = bar_w * 0.5;
-                    for (i, height) in heights.iter().take(bars).enumerate() {
-                        let cx = wave_x0 + i as f32 * wave_step;
-                        let seg = (height * 0.5 - cap_r).max(0.0);
-                        let ddx = (fx - cx).abs();
-                        let ddy = (fy - half).abs() - seg;
-                        let ox = ddx.max(0.0);
-                        let oy = ddy.max(0.0);
-                        let dist = (ox * ox + oy * oy).sqrt() + ddx.max(ddy).min(0.0) - cap_r;
-                        cov = cov.max((0.5 - dist).clamp(0.0, 1.0));
+            // Foreground coverage by style. A mute sign wins over the style:
+            // the overlay is replaced while Voicemeeter mutes the strip.
+            let fg_cov = if mute.is_some() {
+                mute_sign_cov(fx, fy, half, s, dist_center)
+            } else {
+                match style {
+                    VisualStyle::Dot => {
+                        let dot_r = s * 0.40; // diameter 80%
+                        (0.5 - (dist_center - dot_r)).clamp(0.0, 1.0)
                     }
-                    cov
+                    VisualStyle::Ring => {
+                        // Ring: outer ~80% diameter, thickness ~10% of size.
+                        let r_mid = s * 0.35;
+                        let half_thick = s * 0.05;
+                        (half_thick + 0.5 - (dist_center - r_mid).abs()).clamp(0.0, 1.0)
+                    }
+                    VisualStyle::Bar => {
+                        // Rounded bar SDF.
+                        let bqx = (fx - bar_cx).abs() - (bar_hw - bar_r);
+                        let bqy = (fy - bar_cy).abs() - (bar_hh - bar_r);
+                        let bax = bqx.max(0.0);
+                        let bay = bqy.max(0.0);
+                        let b_out = (bax * bax + bay * bay).sqrt();
+                        let b_in = bqx.max(bqy).min(0.0);
+                        let dist_bar = b_out + b_in - bar_r;
+                        (0.5 - dist_bar).clamp(0.0, 1.0)
+                    }
+                    VisualStyle::Mini => {
+                        let mini_r = s * 0.27; // diameter ~54%
+                        (0.5 - (dist_center - mini_r)).clamp(0.0, 1.0)
+                    }
+                    VisualStyle::Wave => {
+                        // Capsule (vertical segment + radius) per bar; take the
+                        // closest bar so adjacent capsules blend smoothly.
+                        let mut cov = 0.0f32;
+                        let cap_r = bar_w * 0.5;
+                        for (i, height) in heights.iter().take(bars).enumerate() {
+                            let cx = wave_x0 + i as f32 * wave_step;
+                            let seg = (height * 0.5 - cap_r).max(0.0);
+                            let ddx = (fx - cx).abs();
+                            let ddy = (fy - half).abs() - seg;
+                            let ox = ddx.max(0.0);
+                            let oy = ddy.max(0.0);
+                            let dist = (ox * ox + oy * oy).sqrt() + ddx.max(ddy).min(0.0) - cap_r;
+                            cov = cov.max((0.5 - dist).clamp(0.0, 1.0));
+                        }
+                        cov
+                    }
                 }
             };
 
@@ -184,7 +194,8 @@ pub fn draw_overlay_into(
             }
 
             // fg over bg: out_a = fg_a + bg_a*(1-fg_a)
-            let (fr, fgc, fb) = (dot.0 as f32, dot.1 as f32, dot.2 as f32);
+            let (frgb, fggb, fbgb) = mute.unwrap_or(dot);
+            let (fr, fgc, fb) = (frgb as f32, fggb as f32, fbgb as f32);
             if fg_cov > 0.0 {
                 let out_a = fg_cov + a * (1.0 - fg_cov);
                 if out_a > 0.0001 {
@@ -222,6 +233,27 @@ pub fn draw_overlay_into(
         }
     }
     true
+}
+
+/// Prohibition sign coverage: a ring plus a diagonal slash, sized as a
+/// fraction of the overlay. Drawn instead of the style glyph while the
+/// Voicemeeter strip is muted.
+fn mute_sign_cov(fx: f32, fy: f32, half: f32, s: f32, dist_center: f32) -> f32 {
+    let ring_r = s * 0.30;
+    let thick = s * 0.055;
+    let ring = (thick + 0.5 - (dist_center - ring_r).abs()).clamp(0.0, 1.0);
+
+    // Slash runs from top-left to bottom-right and ends on the ring.
+    let k = s * 0.18;
+    let (x0, y0) = (half - k, half - k);
+    let (bx, by) = (k * 2.0, k * 2.0);
+    let (px, py) = (fx - x0, fy - y0);
+    let t = ((px * bx + py * by) / (bx * bx + by * by)).clamp(0.0, 1.0);
+    let ex = px - bx * t;
+    let ey = py - by * t;
+    let slash = (thick + 0.5 - (ex * ex + ey * ey).sqrt()).clamp(0.0, 1.0);
+
+    ring.max(slash)
 }
 
 /// A reusable 32-bit top-down DIB + memory DC for one window size. Keeping
@@ -435,5 +467,45 @@ pub fn make_tray_icon(dot: (u8, u8, u8), bg: (u8, u8, u8)) -> Option<HICON> {
         let _ = DeleteObject(hbm_color.into());
         let _ = DeleteObject(hbm_mask.into());
         hicon
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mute_sign_replaces_the_style_glyph() {
+        const S: u32 = 48;
+        let bg = (0x14, 0x14, 0x14);
+        let dot = (0x00, 0xFF, 0x00);
+        let mute = (0xE7, 0x4C, 0x3C);
+
+        let normal = draw_overlay(S, bg, dot, false, VisualStyle::Dot, 90, None);
+        let mut muted = vec![0u32; (S as usize) * (S as usize)];
+        assert!(draw_overlay_into(
+            &mut muted,
+            S,
+            bg,
+            dot,
+            false,
+            VisualStyle::Dot,
+            90,
+            None,
+            Some(mute),
+        ));
+        let at = |px: &[u32], x: usize, y: usize| px[y * S as usize + x];
+
+        // The slash crosses the centre in mute colour, not the dot colour.
+        let centre = at(&muted, 24, 24);
+        assert_eq!((centre >> 16) & 0xFF, 0xE7);
+        assert_eq!((centre >> 8) & 0xFF, 0x4C);
+        assert_eq!(centre & 0xFF, 0x3C);
+        assert_eq!((at(&normal, 24, 24) >> 8) & 0xFF, 0xFF);
+
+        // Inside the old dot but clear of ring and slash: only background.
+        assert_ne!(at(&normal, 24, 16), at(&muted, 24, 16));
+        // The ring is drawn in mute colour too.
+        assert_eq!((at(&muted, 38, 24) >> 16) & 0xFF, 0xE7);
     }
 }

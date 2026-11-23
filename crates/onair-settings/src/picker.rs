@@ -20,6 +20,7 @@ pub enum ColorField {
     Off,
     Unknown,
     Background,
+    Mute,
 }
 
 pub fn field_key(field: ColorField) -> &'static str {
@@ -28,6 +29,7 @@ pub fn field_key(field: ColorField) -> &'static str {
         ColorField::Off => "color_off",
         ColorField::Unknown => "color_unknown",
         ColorField::Background => "color_bg",
+        ColorField::Mute => "color_mute",
     }
 }
 
@@ -37,6 +39,7 @@ pub fn field_title(field: ColorField) -> &'static str {
         ColorField::Off => "Colour — Off",
         ColorField::Unknown => "Colour — Unknown",
         ColorField::Background => "Background colour",
+        ColorField::Mute => "Colour — Mute",
     }
 }
 
@@ -46,6 +49,7 @@ pub fn default_hex(field: ColorField) -> &'static str {
         ColorField::Off => "E74C3C",
         ColorField::Unknown => "808080",
         ColorField::Background => "141414",
+        ColorField::Mute => "E74C3C",
     }
 }
 
@@ -55,6 +59,7 @@ pub fn parse_target(target: &str) -> Option<ColorField> {
         "color_off" => Some(ColorField::Off),
         "color_unknown" => Some(ColorField::Unknown),
         "color_bg" => Some(ColorField::Background),
+        "color_mute" => Some(ColorField::Mute),
         _ => None,
     }
 }
@@ -68,6 +73,7 @@ pub fn canonical_hex(field: ColorField) -> String {
         ColorField::Off => cfg.color_off,
         ColorField::Unknown => cfg.color_unknown,
         ColorField::Background => cfg.color_bg,
+        ColorField::Mute => cfg.color_mute,
     };
     hex_label(r, g, b)
 }

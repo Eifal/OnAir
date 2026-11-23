@@ -717,6 +717,10 @@ pub struct AppConfig {
     pub color_off: (u8, u8, u8),
     pub color_unknown: (u8, u8, u8),
     pub color_bg: (u8, u8, u8),
+    /// Show a mute sign instead of the style while the Voicemeeter strip in
+    /// `vm_param` is muted.
+    pub mute_indicator: bool,
+    pub color_mute: (u8, u8, u8),
 }
 
 impl Default for AppConfig {
@@ -753,6 +757,8 @@ impl Default for AppConfig {
             color_off: (0xE7, 0x4C, 0x3C),
             color_unknown: (0x80, 0x80, 0x80),
             color_bg: (0x14, 0x14, 0x14),
+            mute_indicator: true,
+            color_mute: (0xE7, 0x4C, 0x3C),
         }
     }
 }
@@ -992,6 +998,14 @@ impl AppConfig {
                         cfg.color_bg = c;
                     }
                 }
+                "mute_indicator" | "show_mute" | "mute_badge" => {
+                    cfg.mute_indicator = parse_bool(val, cfg.mute_indicator)
+                }
+                "color_mute" | "mute_color" => {
+                    if let Some(c) = parse_hex6(val) {
+                        cfg.color_mute = c;
+                    }
+                }
                 // Unknown keys ignored (includes legacy macro_* from v0.3.0).
                 _ => {}
             }
@@ -1050,7 +1064,9 @@ impl AppConfig {
              color_on={:02X}{:02X}{:02X}\n\
              color_off={:02X}{:02X}{:02X}\n\
              color_unknown={:02X}{:02X}{:02X}\n\
-             color_bg={:02X}{:02X}{:02X}\n",
+             color_bg={:02X}{:02X}{:02X}\n\
+             color_mute={:02X}{:02X}{:02X}\n\
+             mute_indicator={}\n",
             self.x,
             self.y,
             self.size,
@@ -1087,6 +1103,10 @@ impl AppConfig {
             self.color_bg.0,
             self.color_bg.1,
             self.color_bg.2,
+            self.color_mute.0,
+            self.color_mute.1,
+            self.color_mute.2,
+            self.mute_indicator,
         );
         for mac in &self.macros {
             content.push_str(&mac.encode());
@@ -1196,6 +1216,8 @@ impl AppConfig {
             ConfigKey::ColorOff => color_hex(self.color_off),
             ConfigKey::ColorUnknown => color_hex(self.color_unknown),
             ConfigKey::ColorBg => color_hex(self.color_bg),
+            ConfigKey::ColorMute => color_hex(self.color_mute),
+            ConfigKey::MuteIndicator => self.mute_indicator.to_string(),
         }
     }
 }
@@ -1451,6 +1473,8 @@ pub enum ConfigKey {
     ColorOff,
     ColorUnknown,
     ColorBg,
+    ColorMute,
+    MuteIndicator,
 }
 
 const ACTION_MODE_ALIASES: &[&str] = &["action_mode"];
@@ -1463,6 +1487,8 @@ const SPEAK_RELEASE_ALIASES: &[&str] = &["speak_release"];
 const ANIM_FPS_ALIASES: &[&str] = &["wave_fps"];
 const WAVE_BARS_ALIASES: &[&str] = &["bars"];
 const MENU_STYLE_ALIASES: &[&str] = &["tray_menu_style", "menu"];
+const COLOR_MUTE_ALIASES: &[&str] = &["mute_color"];
+const MUTE_INDICATOR_ALIASES: &[&str] = &["show_mute", "mute_badge"];
 
 impl ConfigKey {
     pub fn name(self) -> &'static str {
@@ -1496,6 +1522,8 @@ impl ConfigKey {
             ConfigKey::ColorOff => "color_off",
             ConfigKey::ColorUnknown => "color_unknown",
             ConfigKey::ColorBg => "color_bg",
+            ConfigKey::ColorMute => "color_mute",
+            ConfigKey::MuteIndicator => "mute_indicator",
         }
     }
 
@@ -1512,13 +1540,15 @@ impl ConfigKey {
             ConfigKey::AnimFps => ANIM_FPS_ALIASES,
             ConfigKey::WaveBars => WAVE_BARS_ALIASES,
             ConfigKey::MenuStyle => MENU_STYLE_ALIASES,
+            ConfigKey::ColorMute => COLOR_MUTE_ALIASES,
+            ConfigKey::MuteIndicator => MUTE_INDICATOR_ALIASES,
             _ => &[],
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
-        const ALL: [ConfigKey; 29] = [
+        const ALL: [ConfigKey; 31] = [
             ConfigKey::X,
             ConfigKey::Y,
             ConfigKey::Size,
@@ -1548,6 +1578,8 @@ impl ConfigKey {
             ConfigKey::ColorOff,
             ConfigKey::ColorUnknown,
             ConfigKey::ColorBg,
+            ConfigKey::ColorMute,
+            ConfigKey::MuteIndicator,
         ];
         ALL.into_iter()
             .find(|k| k.name() == name || k.aliases().iter().any(|alias| *alias == name))
@@ -2123,6 +2155,51 @@ mod tests {
         assert_eq!(cfg.wave_bars, 5);
         assert_eq!(cfg.level_type, 0);
         assert_eq!(cfg.level_channel, None);
+    }
+
+    #[test]
+    fn mute_indicator_and_colour_roundtrip() {
+        let cfg = AppConfig::parse("mute_indicator=false\nmute_color=#00FF00\n");
+        assert!(!cfg.mute_indicator);
+        assert_eq!(cfg.color_mute, (0x00, 0xFF, 0x00));
+        assert!(AppConfig::parse("show_mute=yes\n").mute_indicator);
+        assert!(!AppConfig::parse("mute_badge=0\n").mute_indicator);
+        assert_eq!(
+            AppConfig::parse("mute_color=nope\n").color_mute,
+            AppConfig::default().color_mute
+        );
+
+        let cfg = AppConfig {
+            mute_indicator: false,
+            color_mute: (0x12, 0x34, 0x56),
+            ..Default::default()
+        };
+        let path = temp_config_path("mute-roundtrip");
+        cfg.write_full(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("mute_indicator=false\n"), "text was: {text}");
+        assert!(text.contains("color_mute=123456\n"), "text was: {text}");
+        let loaded = AppConfig::parse(&text);
+        assert!(!loaded.mute_indicator);
+        assert_eq!(loaded.color_mute, (0x12, 0x34, 0x56));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(
+            ConfigKey::from_name("color_mute"),
+            Some(ConfigKey::ColorMute)
+        );
+        assert_eq!(
+            ConfigKey::from_name("mute_color"),
+            Some(ConfigKey::ColorMute)
+        );
+        assert_eq!(
+            ConfigKey::from_name("mute_indicator"),
+            Some(ConfigKey::MuteIndicator)
+        );
+        assert_eq!(
+            ConfigKey::from_name("show_mute"),
+            Some(ConfigKey::MuteIndicator)
+        );
     }
 
     #[test]

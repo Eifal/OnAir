@@ -370,14 +370,18 @@ fn push_config(ui: &AppWindow, cfg: &AppConfig) {
     ui.set_color_off(color_hex(cfg.color_off).into());
     ui.set_color_unknown(color_hex(cfg.color_unknown).into());
     ui.set_color_bg(color_hex(cfg.color_bg).into());
+    ui.set_color_mute(color_hex(cfg.color_mute).into());
+    ui.set_mute_indicator(cfg.mute_indicator);
     ui.set_preview_color_on(slint_color(cfg.color_on));
     ui.set_preview_color_off(slint_color(cfg.color_off));
     ui.set_preview_color_unknown(slint_color(cfg.color_unknown));
     ui.set_preview_color_bg(slint_color(cfg.color_bg));
+    ui.set_preview_color_mute(slint_color(cfg.color_mute));
     ui.set_color_on_invalid(false);
     ui.set_color_off_invalid(false);
     ui.set_color_unknown_invalid(false);
     ui.set_color_bg_invalid(false);
+    ui.set_color_mute_invalid(false);
 
     ui.set_vm_mode(cfg.vm_mode.as_str().into());
     ui.set_vm_param(cfg.vm_param.as_str().into());
@@ -590,6 +594,12 @@ fn normalize_edit(ui: &AppWindow, key: ConfigKey, value: &str) -> Result<String,
         ConfigKey::ColorOff => normalize_color(ui, value, ColorField::Off),
         ConfigKey::ColorUnknown => normalize_color(ui, value, ColorField::Unknown),
         ConfigKey::ColorBg => normalize_color(ui, value, ColorField::Background),
+        ConfigKey::ColorMute => normalize_color(ui, value, ColorField::Mute),
+        ConfigKey::MuteIndicator => {
+            let on = parse_bool(value).ok_or("Mute indicator must be true or false.")?;
+            ui.set_mute_indicator(on);
+            Ok(on.to_string())
+        }
         // Internal hand-off written by the overlay; never edited here.
         ConfigKey::MacroCapture => Err("Internal capture key.".into()),
     }
@@ -605,6 +615,7 @@ fn normalize_color(ui: &AppWindow, value: &str, field: ColorField) -> Result<Str
             ColorField::Off => ui.set_color_off_invalid(true),
             ColorField::Unknown => ui.set_color_unknown_invalid(true),
             ColorField::Background => ui.set_color_bg_invalid(true),
+            ColorField::Mute => ui.set_color_mute_invalid(true),
         }
         return Err("Colours use six hex digits, for example 2ECC71.".into());
     };
@@ -628,6 +639,11 @@ fn normalize_color(ui: &AppWindow, value: &str, field: ColorField) -> Result<Str
             ui.set_color_bg_invalid(false);
             ui.set_preview_color_bg(slint_color(rgb));
             ui.set_color_bg(color_hex(rgb).into());
+        }
+        ColorField::Mute => {
+            ui.set_color_mute_invalid(false);
+            ui.set_preview_color_mute(slint_color(rgb));
+            ui.set_color_mute(color_hex(rgb).into());
         }
     }
     Ok(color_hex(rgb))

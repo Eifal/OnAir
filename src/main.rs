@@ -89,6 +89,9 @@ struct AppState {
     /// phase and release timing.
     anim_last: Option<std::time::Instant>,
     anim_ms: u32,
+    /// Voicemeeter strip mute state; when true the overlay shows a mute sign
+    /// instead of the configured style.
+    muted: bool,
 }
 
 static mut APP: Option<AppState> = None;
@@ -128,7 +131,7 @@ fn sync_pos_from_window() {
 /// wave style; `None` draws the static/minimum-bar frame. The pixel buffer
 /// and DIB are reused.
 fn draw_frame(speaking: Option<(f32, f32)>) {
-    let (hwnd, size, opacity, locked, bg, dot, style, bg_op, bars) = {
+    let (hwnd, size, opacity, locked, bg, dot, style, bg_op, bars, mute) = {
         let a = app_mut();
         (
             a.hwnd,
@@ -140,6 +143,11 @@ fn draw_frame(speaking: Option<(f32, f32)>) {
             a.cfg.visual_style,
             a.cfg.bg_opacity,
             a.cfg.wave_bars,
+            if a.muted && a.cfg.mute_indicator {
+                Some(a.cfg.color_mute)
+            } else {
+                None
+            },
         )
     };
     let needed = (size as usize) * (size as usize);
@@ -162,6 +170,7 @@ fn draw_frame(speaking: Option<(f32, f32)>) {
         style,
         bg_op,
         wave_view,
+        mute,
     );
     if a.surface.as_ref().map(|s| s.size()) != Some((size, size)) {
         a.surface = render::Surface::new(size, size);
@@ -257,7 +266,7 @@ fn wave_quiet_tick() {
             a.cfg.speak_threshold_db as f32,
         )
     };
-    if style != VisualStyle::Wave || !on || !visible {
+    if style != VisualStyle::Wave || !on || !visible || app_mut().muted {
         return;
     }
     let Some(channels) = wave_channels() else {
@@ -274,7 +283,7 @@ fn wave_quiet_tick() {
 /// One animation-timer tick: read level, smooth, redraw, and stop after the
 /// release window (or immediately when the mic/visibility goes away).
 fn anim_tick() {
-    let (style, on, visible, level_type, threshold, release_ms, fps) = {
+    let (style, on, visible, level_type, threshold, release_ms, fps, muted) = {
         let a = app_mut();
         (
             a.cfg.visual_style,
@@ -284,9 +293,10 @@ fn anim_tick() {
             a.cfg.speak_threshold_db as f32,
             a.cfg.speak_release_ms,
             a.cfg.anim_fps,
+            a.muted && a.cfg.mute_indicator,
         )
     };
-    if style != VisualStyle::Wave || !on || !visible {
+    if style != VisualStyle::Wave || !on || !visible || muted {
         stop_anim();
         redraw_locked();
         return;
@@ -347,13 +357,19 @@ fn refresh_tray() {
     if !app_mut().tray_ready {
         return;
     }
-    let (hwnd, cfg_clone, mic_clone, bg) = {
+    let (hwnd, cfg_clone, mic_clone, bg, muted) = {
         let a = app_mut();
-        (a.hwnd, a.cfg.clone(), a.mic.clone(), a.cfg.color_bg)
+        (
+            a.hwnd,
+            a.cfg.clone(),
+            a.mic.clone(),
+            a.cfg.color_bg,
+            a.muted,
+        )
     };
     let dot = vm::dot_color(&cfg_clone, &mic_clone);
     let new_icon = render::make_tray_icon(dot, bg);
-    let tip = tray::tooltip_text(&cfg_clone, &mic_clone);
+    let tip = tray::tooltip_text(&cfg_clone, &mic_clone, muted);
     // Swap icons (destroy old after modify to avoid flicker using null)
     let old = app_mut().tray_icon.replace(new_icon.unwrap_or_default());
     let cur = app_mut().tray_icon.unwrap_or_default();
@@ -369,22 +385,30 @@ fn refresh_tray() {
 }
 
 fn do_poll_and_update() {
-    let (param, invert) = {
+    let (param, invert, mute_indicator) = {
         let a = app_mut();
-        (a.cfg.vm_param.clone(), a.cfg.invert)
+        (a.cfg.vm_param.clone(), a.cfg.invert, a.cfg.mute_indicator)
     };
     let new_state = app_mut().vm.poll(&param, invert);
+    // Strip mute replaces the whole overlay, so it is read on every poll
+    // (after poll() has handled login). Non-strip parameters have no mute.
+    let new_muted = if mute_indicator {
+        vm::strip_index(&param)
+            .and_then(|strip| app_mut().vm.strip_muted(strip))
+            .unwrap_or(false)
+    } else {
+        false
+    };
     let changed = {
         let a = app_mut();
-        if a.mic != new_state {
-            a.mic = new_state;
-            true
-        } else {
-            false
-        }
+        let mic_changed = a.mic != new_state;
+        let mute_changed = a.muted != new_muted;
+        a.mic = new_state;
+        a.muted = new_muted;
+        mic_changed || mute_changed
     };
     if changed {
-        if app_mut().mic != MicState::On {
+        if app_mut().mic != MicState::On || app_mut().muted {
             stop_anim();
         }
         redraw_locked();
@@ -865,13 +889,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     let taskbar = unsafe { APP.as_ref().map(|a| a.taskbar_msg).unwrap_or(0) };
     if msg == taskbar && taskbar != 0 {
         // Explorer restarted: re-add icon
-        let (cfg_c, mic_c, bg) = {
+        let (cfg_c, mic_c, bg, muted) = {
             let a = app_mut();
-            (a.cfg.clone(), a.mic.clone(), a.cfg.color_bg)
+            (a.cfg.clone(), a.mic.clone(), a.cfg.color_bg, a.muted)
         };
         let dot = vm::dot_color(&cfg_c, &mic_c);
         let icon = render::make_tray_icon(dot, bg);
-        let tip = tray::tooltip_text(&cfg_c, &mic_c);
+        let tip = tray::tooltip_text(&cfg_c, &mic_c, muted);
         if let Some(ic) = icon {
             // replace stored icon
             let old = app_mut().tray_icon.replace(ic);
@@ -1243,6 +1267,20 @@ fn handle_command(hwnd: HWND, id: u32) {
         let _ = app_mut().cfg.save_keys(&[ConfigKey::OverlayVisible]);
         return;
     }
+    if id == ID_MUTE_IND {
+        let v = !app_mut().cfg.mute_indicator;
+        app_mut().cfg.mute_indicator = v;
+        if !v {
+            app_mut().muted = false;
+        }
+        let _ = app_mut().cfg.save_keys(&[ConfigKey::MuteIndicator]);
+        stop_anim();
+        // Re-read the strip mute so enabling the indicator applies at once.
+        do_poll_and_update();
+        redraw_locked();
+        refresh_tray();
+        return;
+    }
     if id == ID_SETTINGS {
         tray::open_settings();
         return;
@@ -1430,6 +1468,7 @@ fn main() {
             anim_channels: None,
             anim_last: None,
             anim_ms: 0,
+            muted: false,
         });
         rebuild_macro_state(app_mut());
 
@@ -1450,7 +1489,7 @@ fn main() {
             let a = app_mut();
             let dot = vm::dot_color(&a.cfg, &a.mic);
             let icon = render::make_tray_icon(dot, a.cfg.color_bg);
-            let tip = tray::tooltip_text(&a.cfg, &a.mic);
+            let tip = tray::tooltip_text(&a.cfg, &a.mic, a.muted);
             if let Some(ic) = icon {
                 if let Some(old) = a.tray_icon.replace(ic) {
                     if !old.is_invalid() {

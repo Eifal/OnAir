@@ -54,14 +54,18 @@ export component AppWindow inherits Window {
     in-out property <string> color-off: "E74C3C";
     in-out property <string> color-unknown: "808080";
     in-out property <string> color-bg: "141414";
+    in-out property <string> color-mute: "E74C3C";
+    in-out property <bool> mute-indicator: true;
     in property <bool> color-on-invalid: false;
     in property <bool> color-off-invalid: false;
     in property <bool> color-unknown-invalid: false;
     in property <bool> color-bg-invalid: false;
+    in property <bool> color-mute-invalid: false;
     in property <color> preview-color-on: #2ECC71;
     in property <color> preview-color-off: #E74C3C;
     in property <color> preview-color-unknown: #808080;
     in property <color> preview-color-bg: #141414;
+    in property <color> preview-color-mute: #E74C3C;
 
     in-out property <string> vm-mode: "toggle";
     in-out property <string> vm-param: "Strip[0].B2";
@@ -450,14 +454,18 @@ export component AppWindow inherits Window {
                         color-off <=> root.color-off;
                         color-unknown <=> root.color-unknown;
                         color-bg <=> root.color-bg;
+                        color-mute <=> root.color-mute;
+                        mute-indicator <=> root.mute-indicator;
                         color-on-invalid: root.color-on-invalid;
                         color-off-invalid: root.color-off-invalid;
                         color-unknown-invalid: root.color-unknown-invalid;
                         color-bg-invalid: root.color-bg-invalid;
+                        color-mute-invalid: root.color-mute-invalid;
                         preview-color-on: root.preview-color-on;
                         preview-color-off: root.preview-color-off;
                         preview-color-unknown: root.preview-color-unknown;
                         preview-color-bg: root.preview-color-bg;
+                        preview-color-mute: root.preview-color-mute;
                         apply-now(k, v) => { root.apply-now(k, v); }
                         apply-later(k, v) => { root.apply-later(k, v); }
                         open-picker(k) => { root.open-picker(k); }
