@@ -20,8 +20,9 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    GetAsyncKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_END,
+    VK_ESCAPE, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SPACE,
+    VK_UP, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -1049,6 +1050,45 @@ fn is_session_window(s: &Session, hwnd: HWND) -> bool {
         .any(|m| m.hwnd == hwnd || m.content == hwnd)
 }
 
+fn point_in_rect(r: &RECT, pt: POINT) -> bool {
+    pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
+}
+
+/// Fallback dismissal for the case where `SetForegroundWindow` was denied.
+/// Without foreground the menu never receives `WM_ACTIVATE(WA_INACTIVE)`, so
+/// an outside click (or Esc) would leave the nested message loop running
+/// forever and the app would look hung. Polling the global input state is the
+/// only reliable check in that situation; native menus get it from mouse
+/// capture, which the layered glass windows cannot use without breaking item
+/// hit-testing.
+fn outside_press_wants_close(s: &Session) -> bool {
+    unsafe {
+        if GetAsyncKeyState(VK_ESCAPE.0 as i32) < 0 {
+            return true;
+        }
+        let pressed = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
+            .iter()
+            .any(|vk| GetAsyncKeyState(vk.0 as i32) < 0);
+        if !pressed {
+            return false;
+        }
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        // Clicking the menu's own padding (gutter, separators) is still
+        // "inside": only a press on something else dismisses the menu.
+        let mut r = RECT::default();
+        if !s.root.is_invalid() && GetWindowRect(s.root, &mut r).is_ok() && point_in_rect(&r, pt) {
+            return false;
+        }
+        !s.windows.iter().any(|m| {
+            let mut r = RECT::default();
+            GetWindowRect(m.hwnd, &mut r).is_ok() && point_in_rect(&r, pt)
+        })
+    }
+}
+
 fn close_session(s: &mut Session, result: Option<u32>) {
     if s.done {
         return;
@@ -1496,6 +1536,7 @@ unsafe fn handle_glass_message(
             if state == WA_INACTIVE && !s.done {
                 let active = GetForegroundWindow();
                 if !is_session_window(s, active) {
+                    crate::dbglog!("menu dismissed by WM_ACTIVATE, active={active:?}");
                     close_session(s, None);
                 }
             }
@@ -1595,6 +1636,15 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
         }
         let _ = SetForegroundWindow(root);
         let _ = SetFocus(Some(root));
+        let foreground = GetForegroundWindow();
+        if !session()
+            .map(|s| is_session_window(s, foreground))
+            .unwrap_or(true)
+        {
+            crate::dbglog!(
+                "menu could not take foreground (fg={foreground:?}); fallback dismissal active"
+            );
+        }
 
         let mut msg = MSG::default();
         loop {
@@ -1602,17 +1652,38 @@ pub fn show(_hwnd: HWND, cfg: &AppConfig) -> Option<u32> {
             if done {
                 break;
             }
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            if ret.0 == 0 {
-                // Preserve WM_QUIT for the main application loop.
-                PostQuitMessage(msg.wParam.0 as i32);
+            // The menu runs its own nested loop, so keep the watchdog fed:
+            // a real stall is a long gap between these beats, not the menu
+            // simply being open.
+            crate::debuglog::beat();
+            // Bounded wait instead of GetMessageW: the fallback dismissal must
+            // be able to run even when the menu never receives activation.
+            let wait = MsgWaitForMultipleObjectsEx(None, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            if wait == WAIT_FAILED {
+                crate::dbglog!("menu wait failed");
                 break;
             }
-            if ret.0 == -1 {
-                break;
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    // Preserve WM_QUIT for the main application loop.
+                    PostQuitMessage(msg.wParam.0 as i32);
+                    return cleanup_session();
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                if session().map(|s| s.done).unwrap_or(true) {
+                    break;
+                }
             }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            if let Some(s) = session() {
+                if !s.done && outside_press_wants_close(s) {
+                    crate::dbglog!(
+                        "menu dismissed by fallback (outside click/Esc, fg={:?})",
+                        GetForegroundWindow()
+                    );
+                    close_session(s, None);
+                }
+            }
         }
         cleanup_session()
     }

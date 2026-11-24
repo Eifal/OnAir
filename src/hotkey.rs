@@ -13,6 +13,8 @@
 //!   is held, and a bare `F13` trigger does not fire while Ctrl is held. This
 //!   lets one key host several macros.
 
+use std::time::Instant;
+
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -74,6 +76,13 @@ static mut MODS: Modifiers = Modifiers {
 // down/up pair, and a press fires once per physical press.
 static mut DOWN_TOGGLE: bool = false;
 static mut DOWN_MACROS: Vec<bool> = Vec::new();
+// Re-trigger guard: ignore a second press of the same trigger within
+// `GUARD_MS`. Mouse switches that are worn out (and vendor software that
+// duplicates a click) emit down/up/down/up within a few ms; two full presses
+// in that window cannot be human. 0 disables the guard.
+static mut GUARD_MS: u32 = 0;
+static mut LAST_TOGGLE: Option<Instant> = None;
+static mut LAST_MACROS: Vec<Option<Instant>> = Vec::new();
 
 fn target() -> HWND {
     unsafe { TARGET }
@@ -104,6 +113,8 @@ fn remove_hooks() {
         }
         DOWN_TOGGLE = false;
         DOWN_MACROS.iter_mut().for_each(|down| *down = false);
+        LAST_TOGGLE = None;
+        LAST_MACROS.iter_mut().for_each(|last| *last = None);
     }
 }
 
@@ -113,12 +124,14 @@ fn has_binds() -> bool {
 
 /// Install hooks only if at least one trigger is configured. Safe to call
 /// once at startup; on failure the hotkeys simply stay inactive (no popups).
-pub fn init(hwnd: HWND, _hinstance: HINSTANCE, bind: Trigger, macros: Vec<Trigger>) {
+pub fn init(hwnd: HWND, _hinstance: HINSTANCE, bind: Trigger, macros: Vec<Trigger>, guard_ms: u32) {
     unsafe {
         TARGET = hwnd;
         BIND = bind;
         MACROS = macros;
         DOWN_MACROS = vec![false; MACROS.len()];
+        LAST_MACROS = vec![None; MACROS.len()];
+        GUARD_MS = guard_ms;
     }
     if has_binds() {
         ensure_hooks();
@@ -134,12 +147,15 @@ pub fn shutdown() {
 
 /// Refresh the shadow triggers after cfg changes (called from wndproc only).
 /// Resets the down trackers so a bind change mid-hold cannot stick them.
-pub fn set_bind(bind: Trigger, macros: Vec<Trigger>) {
+pub fn set_bind(bind: Trigger, macros: Vec<Trigger>, guard_ms: u32) {
     unsafe {
         BIND = bind;
         MACROS = macros;
         DOWN_TOGGLE = false;
         DOWN_MACROS = vec![false; MACROS.len()];
+        LAST_TOGGLE = None;
+        LAST_MACROS = vec![None; MACROS.len()];
+        GUARD_MS = guard_ms;
     }
     if !has_binds() && !is_capturing() {
         remove_hooks();
@@ -237,12 +253,53 @@ fn trigger_matches(trigger: Trigger, kind: usize, code: usize, mods: Modifiers) 
     trigger.mods == mods && key_matches(trigger, kind, code)
 }
 
+/// True when this physical key/button drives any configured trigger, ignoring
+/// modifiers. Only used to keep the debug log focused on relevant events.
+fn bound_key(kind: usize, code: usize) -> bool {
+    unsafe { key_matches(BIND, kind, code) || MACROS.iter().any(|t| key_matches(*t, kind, code)) }
+}
+
+/// Re-trigger guard. Records the accepted press time and rejects a second
+/// press inside `GUARD_MS` (mouse chatter / duplicated injected clicks).
+fn retrigger_ok(last: &mut Option<Instant>) -> bool {
+    let guard = unsafe { GUARD_MS };
+    let now = Instant::now();
+    let allowed = guard_allows(*last, now, guard);
+    if allowed {
+        *last = Some(now);
+    }
+    allowed
+}
+
+/// Pure form of the guard, so the window logic is unit-testable.
+fn guard_allows(last: Option<Instant>, now: Instant, guard_ms: u32) -> bool {
+    if guard_ms == 0 {
+        return true;
+    }
+    match last {
+        Some(prev) => now.duration_since(prev).as_millis() >= guard_ms as u128,
+        None => true,
+    }
+}
+
 unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode >= 0 {
         let msg = wparam.0 as u32;
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let vk = event_vk(info);
+            if crate::debuglog::enabled() && (CAPTURING || bound_key(CAP_KEY, vk as usize)) {
+                crate::dbglog!(
+                    "hook kb down vk=0x{vk:02X} scan=0x{:X} ext={} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
+                    info.scanCode,
+                    info.flags.contains(LLKHF_EXTENDED),
+                    info.flags.contains(LLKHF_INJECTED),
+                    info.flags.contains(LLKHF_LOWER_IL_INJECTED),
+                    info.time,
+                    mods_bits(MODS),
+                    CAPTURING
+                );
+            }
             if CAPTURING {
                 // Esc cancels capture and is never bindable. Modifiers are
                 // recorded and skipped so Ctrl+A captures Ctrl+A.
@@ -257,25 +314,48 @@ unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
                 flag(&mut MODS, true);
             } else {
                 if !DOWN_TOGGLE && trigger_matches(BIND, CAP_KEY, vk as usize, MODS) {
-                    DOWN_TOGGLE = true;
-                    post_action(WM_KEY_DOWN, ACTION_TOGGLE);
+                    if retrigger_ok(&mut LAST_TOGGLE) {
+                        DOWN_TOGGLE = true;
+                        post_action(WM_KEY_DOWN, ACTION_TOGGLE);
+                    } else {
+                        crate::dbglog!("hook kb down vk=0x{vk:02X} suppressed: retrigger guard");
+                    }
                 }
                 for (index, trigger) in MACROS.iter().enumerate() {
                     if !DOWN_MACROS[index] && trigger_matches(*trigger, CAP_KEY, vk as usize, MODS)
                     {
-                        DOWN_MACROS[index] = true;
-                        post_action(WM_KEY_DOWN, action_macro(index));
+                        if retrigger_ok(&mut LAST_MACROS[index]) {
+                            DOWN_MACROS[index] = true;
+                            post_action(WM_KEY_DOWN, action_macro(index));
+                        } else {
+                            crate::dbglog!(
+                                "hook kb down vk=0x{vk:02X} macro {index} suppressed: retrigger guard"
+                            );
+                        }
                     }
                 }
             }
         } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+            let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            let vk = event_vk(info);
+            if crate::debuglog::enabled() && bound_key(CAP_KEY, vk as usize) {
+                crate::dbglog!(
+                    "hook kb up vk=0x{vk:02X} scan=0x{:X} ext={} injected={} os_t={} mods=0x{:X}",
+                    info.scanCode,
+                    info.flags.contains(LLKHF_EXTENDED),
+                    info.flags.contains(LLKHF_INJECTED),
+                    info.time,
+                    mods_bits(MODS)
+                );
+            }
+            // Modifier tracking must stay accurate while capturing: capture is
+            // down-only, so a modifier released mid-capture would otherwise
+            // stay "held" forever and break exact-modifier matching afterwards.
+            if let Some(flag) = modifier_flag(vk) {
+                flag(&mut MODS, false);
+            }
             // Key-up is ignored while capturing (capture is down-only).
             if !CAPTURING {
-                let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                let vk = event_vk(info);
-                if let Some(flag) = modifier_flag(vk) {
-                    flag(&mut MODS, false);
-                }
                 // Match only the base key on release: the user may let go of
                 // Ctrl before F13, and the hold must still end cleanly.
                 if DOWN_TOGGLE && key_matches(BIND, CAP_KEY, vk as usize) {
@@ -329,22 +409,55 @@ unsafe extern "system" fn ms_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) ->
         };
         if let Some(b) = down_btn {
             let code = b.id() as usize;
+            if crate::debuglog::enabled() && (CAPTURING || bound_key(CAP_MOUSE, code)) {
+                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                crate::dbglog!(
+                    "hook ms down btn={:?} data=0x{:X} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
+                    b,
+                    info.mouseData,
+                    info.flags & LLMHF_INJECTED != 0,
+                    info.flags & LLMHF_LOWER_IL_INJECTED != 0,
+                    info.time,
+                    mods_bits(MODS),
+                    CAPTURING
+                );
+            }
             if CAPTURING {
                 post_capture(CAP_MOUSE, code, MODS);
             } else {
                 if !DOWN_TOGGLE && trigger_matches(BIND, CAP_MOUSE, code, MODS) {
-                    DOWN_TOGGLE = true;
-                    post_action(WM_KEY_DOWN, ACTION_TOGGLE);
+                    if retrigger_ok(&mut LAST_TOGGLE) {
+                        DOWN_TOGGLE = true;
+                        post_action(WM_KEY_DOWN, ACTION_TOGGLE);
+                    } else {
+                        crate::dbglog!("hook ms down {b:?} suppressed: retrigger guard");
+                    }
                 }
                 for (index, trigger) in MACROS.iter().enumerate() {
                     if !DOWN_MACROS[index] && trigger_matches(*trigger, CAP_MOUSE, code, MODS) {
-                        DOWN_MACROS[index] = true;
-                        post_action(WM_KEY_DOWN, action_macro(index));
+                        if retrigger_ok(&mut LAST_MACROS[index]) {
+                            DOWN_MACROS[index] = true;
+                            post_action(WM_KEY_DOWN, action_macro(index));
+                        } else {
+                            crate::dbglog!(
+                                "hook ms down {b:?} macro {index} suppressed: retrigger guard"
+                            );
+                        }
                     }
                 }
             }
         } else if let Some(b) = up_btn {
             let code = b.id() as usize;
+            if crate::debuglog::enabled() && bound_key(CAP_MOUSE, code) {
+                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                crate::dbglog!(
+                    "hook ms up btn={:?} data=0x{:X} injected={} os_t={}",
+                    b,
+                    info.mouseData,
+                    info.flags & LLMHF_INJECTED != 0,
+                    info.time
+                );
+            }
             if !CAPTURING {
                 if DOWN_TOGGLE && key_matches(BIND, CAP_MOUSE, code) {
                     DOWN_TOGGLE = false;
@@ -470,5 +583,25 @@ mod tests {
         assert_eq!(ACTION_TOGGLE, 0);
         assert_eq!(action_macro(0), 1);
         assert_eq!(action_macro(7), 8);
+    }
+
+    #[test]
+    fn retrigger_guard_blocks_chatter_only() {
+        let t0 = Instant::now();
+        assert!(guard_allows(None, t0, 40));
+        // First press accepted, chatter 5 ms later rejected.
+        assert!(!guard_allows(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(5),
+            40
+        ));
+        // A normal second click 200 ms later is accepted.
+        assert!(guard_allows(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(200),
+            40
+        ));
+        // 0 disables the guard entirely.
+        assert!(guard_allows(Some(t0), t0, 0));
     }
 }

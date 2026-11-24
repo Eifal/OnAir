@@ -721,6 +721,12 @@ pub struct AppConfig {
     /// `vm_param` is muted.
     pub mute_indicator: bool,
     pub color_mute: (u8, u8, u8),
+    /// Write `onair-debug.log` next to config.ini (see `src/debuglog.rs`).
+    /// Off by default: the app is silent unless this is enabled.
+    pub debug_log: bool,
+    /// Ignore a second activation of the same trigger within this window.
+    /// Filters mouse-switch chatter and duplicated injected clicks. 0 = off.
+    pub retrigger_ms: u32,
 }
 
 impl Default for AppConfig {
@@ -759,6 +765,8 @@ impl Default for AppConfig {
             color_bg: (0x14, 0x14, 0x14),
             mute_indicator: true,
             color_mute: (0xE7, 0x4C, 0x3C),
+            debug_log: false,
+            retrigger_ms: 40,
         }
     }
 }
@@ -775,6 +783,7 @@ impl AppConfig {
         self.anim_fps = self.anim_fps.clamp(10, 60);
         self.wave_bars = self.wave_bars.clamp(3, 9);
         self.level_type = self.level_type.min(3);
+        self.retrigger_ms = self.retrigger_ms.min(500);
         if let Some(channel) = self.level_channel {
             self.level_channel = Some(channel.min(4095));
         }
@@ -1006,6 +1015,12 @@ impl AppConfig {
                         cfg.color_mute = c;
                     }
                 }
+                "debug_log" | "debug" | "log" => cfg.debug_log = parse_bool(val, cfg.debug_log),
+                "retrigger_ms" | "debounce_ms" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        cfg.retrigger_ms = n;
+                    }
+                }
                 // Unknown keys ignored (includes legacy macro_* from v0.3.0).
                 _ => {}
             }
@@ -1066,7 +1081,9 @@ impl AppConfig {
              color_unknown={:02X}{:02X}{:02X}\n\
              color_bg={:02X}{:02X}{:02X}\n\
              color_mute={:02X}{:02X}{:02X}\n\
-             mute_indicator={}\n",
+             mute_indicator={}\n\
+             retrigger_ms={}\n\
+             debug_log={}\n",
             self.x,
             self.y,
             self.size,
@@ -1107,6 +1124,8 @@ impl AppConfig {
             self.color_mute.1,
             self.color_mute.2,
             self.mute_indicator,
+            self.retrigger_ms,
+            self.debug_log,
         );
         for mac in &self.macros {
             content.push_str(&mac.encode());
@@ -1847,6 +1866,20 @@ mod tests {
         assert_eq!(parse_vm_mode("garbage"), VmMode::Toggle);
         assert_eq!(VmMode::Toggle.as_str(), "toggle");
         assert_eq!(VmMode::Switch.as_str(), "switch");
+    }
+
+    #[test]
+    fn diagnostics_keys_parse_and_clamp() {
+        let cfg = AppConfig::parse("debug_log=true\nretrigger_ms=0\n");
+        assert!(cfg.debug_log);
+        assert_eq!(cfg.retrigger_ms, 0);
+        assert!(AppConfig::parse("debug=1\n").debug_log);
+        assert!(AppConfig::parse("log=yes\n").debug_log);
+        assert!(!AppConfig::parse("debug_log=off\n").debug_log);
+        assert_eq!(AppConfig::parse("retrigger_ms=9999\n").retrigger_ms, 500);
+        assert_eq!(AppConfig::parse("debounce_ms=15\n").retrigger_ms, 15);
+        assert!(!AppConfig::default().debug_log);
+        assert_eq!(AppConfig::default().retrigger_ms, 40);
     }
 
     #[test]

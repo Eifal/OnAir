@@ -5,6 +5,20 @@ use windows::Win32::System::Registry::*;
 
 use onair_config::AppConfig;
 
+/// Time a Remote API call and log it when it blocks the UI thread for long
+/// enough to be visible. Normal calls are microseconds.
+macro_rules! timed {
+    ($name:expr, $call:expr) => {{
+        let started = std::time::Instant::now();
+        let result = $call;
+        let ms = started.elapsed().as_millis();
+        if ms >= crate::debuglog::SLOW_MS {
+            crate::dbglog!("SLOW vm {} {}ms -> {}", $name, ms, result);
+        }
+        result
+    }};
+}
+
 // Verified against official VB-Audio "Voicemeeter Remote API" doc + VoicemeeterRemote.h:
 //   long __stdcall VBVMR_Login(void);            // 0 OK, 1 OK but app not running, <0 error
 //   long __stdcall VBVMR_Logout(void);           // 0 ok
@@ -188,7 +202,8 @@ impl VmClient {
                 }
             }
             self.last_login = Some(now);
-            let rep = unsafe { f_login() };
+            let rep = timed!("login", unsafe { f_login() });
+            crate::dbglog!("vm login rep={rep}");
             if rep == 0 || rep == 1 {
                 self.logged_in = true;
                 self.refresh_edition();
@@ -200,9 +215,10 @@ impl VmClient {
         }
 
         // Best-effort dirty check; ignore result except errors.
-        let dirty = unsafe { f_dirty() };
+        let dirty = timed!("dirty", unsafe { f_dirty() });
         if dirty == -2 {
             // no server -> logout so we retry login later (throttled)
+            crate::dbglog!("vm no server (dirty=-2), logout");
             self.do_logout();
             return MicState::Unknown("Voicemeeter not running".to_string());
         }
@@ -211,7 +227,9 @@ impl VmClient {
         let mut name: Vec<u8> = vm_param.as_bytes().to_vec();
         name.push(0);
         let mut val: f32 = 0.0;
-        let rep = unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) };
+        let rep = timed!("get", unsafe {
+            f_get(name.as_mut_ptr(), &mut val as *mut f32)
+        });
         match rep {
             0 => {
                 let mut on = val >= 0.5;
@@ -236,9 +254,7 @@ impl VmClient {
     fn do_logout(&mut self) {
         if self.logged_in {
             if let Some(f) = self.f_logout {
-                unsafe {
-                    let _ = f();
-                }
+                timed!("logout", unsafe { f() });
             }
         }
         self.logged_in = false;
@@ -256,7 +272,8 @@ impl VmClient {
             return;
         };
         let mut kind: i32 = 0;
-        if unsafe { f(&mut kind as *mut i32) } == 0 {
+        let rep = timed!("type", unsafe { f(&mut kind as *mut i32) });
+        if rep == 0 {
             self.edition = Some(kind);
         }
     }
@@ -285,7 +302,9 @@ impl VmClient {
             return None;
         }
         let mut value: f32 = 0.0;
-        let rep = unsafe { f(level_type.min(3) as i32, channel as i32, &mut value) };
+        let rep = timed!("level", unsafe {
+            f(level_type.min(3) as i32, channel as i32, &mut value)
+        });
         if rep == 0 {
             Some(value.max(0.0))
         } else {
@@ -300,7 +319,7 @@ impl VmClient {
             return false;
         };
         self.last_login = Some(std::time::Instant::now());
-        let rep = unsafe { f_login() };
+        let rep = timed!("login(action)", unsafe { f_login() });
         if rep == 0 || rep == 1 {
             self.logged_in = true;
             self.refresh_edition();
@@ -352,7 +371,8 @@ impl VmClient {
             return false;
         }
         let mut name = Self::ansi_param(vm_param);
-        let rep = unsafe { f_set(name.as_mut_ptr(), value) };
+        let rep = timed!("set", unsafe { f_set(name.as_mut_ptr(), value) });
+        crate::dbglog!("vm set {vm_param}={value} rep={rep}");
         if rep == -2 {
             self.do_logout();
             return false;
@@ -370,7 +390,10 @@ impl VmClient {
         let f_get = self.f_get?;
         let mut name = Self::ansi_param(vm_param);
         let mut val: f32 = 0.0;
-        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+        let rep = timed!("get(button)", unsafe {
+            f_get(name.as_mut_ptr(), &mut val as *mut f32)
+        });
+        if rep != 0 {
             return None;
         }
         Some(val >= 0.5)
@@ -385,7 +408,10 @@ impl VmClient {
         let f_get = self.f_get?;
         let mut name = Self::ansi_param(vm_param);
         let mut val: f32 = 0.0;
-        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+        let rep = timed!("get(raw)", unsafe {
+            f_get(name.as_mut_ptr(), &mut val as *mut f32)
+        });
+        if rep != 0 {
             return None;
         }
         Some(val)
@@ -408,12 +434,17 @@ impl VmClient {
         let primary_on = self.read_button(primary)?;
         let secondary_on = self.read_button(secondary)?;
         let (target, secondary_target) = switch_target(primary_on);
+        crate::dbglog!(
+            "vm switch {primary}={primary_on} {secondary}={secondary_on} -> {target}/{secondary_target}"
+        );
         if !self.set_raw(primary, flag(target)) {
+            crate::dbglog!("vm switch failed on {primary}");
             return None;
         }
         if !self.set_raw(secondary, flag(secondary_target)) {
             // Do not leave the pair with both buttons ON when the second
             // write failed; put the primary back where it was.
+            crate::dbglog!("vm switch failed on {secondary}, restoring {primary}");
             let _ = self.set_raw(primary, flag(primary_on));
             return None;
         }
@@ -454,11 +485,16 @@ impl VmClient {
         }
         let mut name = Self::ansi_param(vm_param);
         let mut val: f32 = 0.0;
-        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+        let rep = timed!("toggle get", unsafe {
+            f_get(name.as_mut_ptr(), &mut val as *mut f32)
+        });
+        if rep != 0 {
             return;
         }
         let flipped = if val >= 0.5 { 0.0 } else { 1.0 };
-        if unsafe { f_set(name.as_mut_ptr(), flipped) } == -2 {
+        let rep = timed!("toggle set", unsafe { f_set(name.as_mut_ptr(), flipped) });
+        crate::dbglog!("vm toggle {vm_param} {val} -> {flipped} rep={rep}");
+        if rep == -2 {
             // Server went away mid-toggle: drop the pipe so poll()
             // retries the login later instead of erroring forever.
             self.do_logout();
@@ -535,7 +571,10 @@ impl VmClient {
         let f_get = self.f_get?;
         let mut name = Self::ansi_param(&mute_param(strip));
         let mut val: f32 = 0.0;
-        if unsafe { f_get(name.as_mut_ptr(), &mut val as *mut f32) } != 0 {
+        let rep = timed!("get(mute)", unsafe {
+            f_get(name.as_mut_ptr(), &mut val as *mut f32)
+        });
+        if rep != 0 {
             return None;
         }
         Some(val >= 0.5)

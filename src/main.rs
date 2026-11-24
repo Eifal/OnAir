@@ -2,6 +2,7 @@
 #![allow(static_mut_refs)]
 
 mod config;
+mod debuglog;
 mod glassmenu;
 mod hotkey;
 mod render;
@@ -374,7 +375,9 @@ fn refresh_tray() {
     let old = app_mut().tray_icon.replace(new_icon.unwrap_or_default());
     let cur = app_mut().tray_icon.unwrap_or_default();
     let cur_opt = if cur.is_invalid() { None } else { Some(cur) };
+    let started = std::time::Instant::now();
     tray::modify_tray(hwnd, cur_opt, &tip);
+    debuglog::slow("tray modify", started.elapsed().as_millis(), &tip);
     if let Some(o) = old {
         if !o.is_invalid() && o != cur {
             unsafe {
@@ -385,6 +388,8 @@ fn refresh_tray() {
 }
 
 fn do_poll_and_update() {
+    debuglog::set_stage(debuglog::STAGE_POLL);
+    let started = std::time::Instant::now();
     let (param, invert, mute_indicator) = {
         let a = app_mut();
         (a.cfg.vm_param.clone(), a.cfg.invert, a.cfg.mute_indicator)
@@ -408,12 +413,23 @@ fn do_poll_and_update() {
         mic_changed || mute_changed
     };
     if changed {
+        crate::dbglog!(
+            "poll {param} -> {:?} muted={} ({}ms)",
+            app_mut().mic,
+            app_mut().muted,
+            started.elapsed().as_millis()
+        );
         if app_mut().mic != MicState::On || app_mut().muted {
             stop_anim();
         }
         redraw_locked();
         refresh_tray();
     }
+    let elapsed = started.elapsed().as_millis();
+    if elapsed >= debuglog::SLOW_MS {
+        debuglog::slow("poll", elapsed, format_args!("{param}"));
+    }
+    debuglog::set_stage(debuglog::STAGE_IDLE);
 }
 
 /// Perform one switch press and return the raw A/B states from before the
@@ -429,10 +445,28 @@ fn switch_now() -> Option<(bool, bool)> {
 /// Run the configured action via the Remote API, then poll immediately so
 /// the overlay reflects the result. Silent on any failure.
 fn do_toggle() {
+    debuglog::set_stage(debuglog::STAGE_ACTION);
+    let started = std::time::Instant::now();
     let mode = app_mut().cfg.vm_mode;
+    let (param, param_b) = {
+        let c = &app_mut().cfg;
+        (c.vm_param.clone(), c.vm_param_b.clone())
+    };
+    let before = if debuglog::enabled() {
+        let a = app_mut();
+        (
+            a.vm.read_raw(&param),
+            if mode == VmMode::Switch {
+                a.vm.read_raw(&param_b)
+            } else {
+                None
+            },
+        )
+    } else {
+        (None, None)
+    };
     match mode {
         VmMode::Toggle => {
-            let param = app_mut().cfg.vm_param.clone();
             app_mut().vm.toggle_param(&param);
         }
         VmMode::Switch => {
@@ -440,6 +474,27 @@ fn do_toggle() {
         }
     }
     do_poll_and_update();
+    if debuglog::enabled() {
+        let a = app_mut();
+        let after = (
+            a.vm.read_raw(&param),
+            if mode == VmMode::Switch {
+                a.vm.read_raw(&param_b)
+            } else {
+                None
+            },
+        );
+        crate::dbglog!(
+            "action {:?} {param}: {:?} -> {:?} {param_b}: {:?} -> {:?} total={}ms",
+            mode,
+            before.0,
+            after.0,
+            before.1,
+            after.1,
+            started.elapsed().as_millis()
+        );
+    }
+    debuglog::set_stage(debuglog::STAGE_IDLE);
 }
 
 /// Raw value that renders as display ON/OFF (accounts for `invert`,
@@ -464,6 +519,12 @@ fn do_hold_down() {
     if app_mut().cfg.toggle_key.is_none() {
         return;
     }
+    crate::dbglog!(
+        "hold down mode={:?} mic={:?} switch_saved={:?}",
+        app_mut().cfg.vm_mode,
+        app_mut().mic,
+        app_mut().hold_saved_switch
+    );
     if app_mut().cfg.vm_mode == VmMode::Switch {
         // Momentary A/B: swap now, restore both raw states on release.
         let Some(saved) = switch_now() else {
@@ -505,6 +566,14 @@ fn do_hold_up_restore() {
     if !app_mut().hold_held {
         return;
     }
+    crate::dbglog!(
+        "hold up (restore) mode={:?} held={}ms",
+        app_mut().cfg.vm_mode,
+        app_mut()
+            .hold_down_at
+            .map(|t| t.elapsed().as_millis())
+            .unwrap_or(0)
+    );
     let (mode, primary, secondary, invert, saved_on, saved_switch) = {
         let a = app_mut();
         let s = a.hold_saved_on;
@@ -570,6 +639,11 @@ fn do_hold_up_both() {
         )
     };
     let (dur_ms, thresh_ms) = thresh;
+    crate::dbglog!(
+        "hold up mode={:?} dur={dur_ms}ms threshold={thresh_ms}ms tap={}",
+        mode,
+        dur_ms < thresh_ms
+    );
     match mode {
         VmMode::Toggle => {
             if let Some(saved_on) = saved_on {
@@ -782,6 +856,7 @@ fn reset_macro_tracking() {
 }
 
 fn on_key_down(action: usize) {
+    crate::dbglog!("key down action={action}");
     if action == hotkey::ACTION_TOGGLE {
         match app_mut().cfg.trigger_mode {
             TriggerMode::Toggle => do_toggle(),
@@ -793,6 +868,7 @@ fn on_key_down(action: usize) {
 }
 
 fn on_key_up(action: usize) {
+    crate::dbglog!("key up action={action}");
     if action == hotkey::ACTION_TOGGLE {
         match app_mut().cfg.trigger_mode {
             TriggerMode::Toggle => {}
@@ -805,6 +881,7 @@ fn on_key_up(action: usize) {
 }
 
 fn begin_capture(target: usize) {
+    crate::dbglog!("capture begin target={target}");
     hotkey::set_capturing(true);
     {
         let a = app_mut();
@@ -869,7 +946,7 @@ fn apply_all_after_config_change() {
     {
         let bind = app_mut().cfg.toggle_trigger();
         let macros = macro_triggers(&app_mut().cfg);
-        hotkey::set_bind(bind, macros);
+        hotkey::set_bind(bind, macros, app_mut().cfg.retrigger_ms);
     }
     unsafe {
         let _ = KillTimer(Some(hwnd), window::TIMER_POLL);
@@ -885,6 +962,7 @@ fn apply_all_after_config_change() {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    debuglog::beat();
     // TaskbarCreated is dynamic; compare if APP initialized.
     let taskbar = unsafe { APP.as_ref().map(|a| a.taskbar_msg).unwrap_or(0) };
     if msg == taskbar && taskbar != 0 {
@@ -1105,6 +1183,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Windows 10/11 builds.
             match mouse {
                 WM_LBUTTONUP | WM_LBUTTONDBLCLK | 1024 => {
+                    crate::dbglog!("tray click mouse=0x{mouse:X} -> settings");
                     tray::open_settings();
                 }
                 WM_RBUTTONUP | 123 => {
@@ -1112,20 +1191,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // for one click; never stack two modal menus.
                     static mut IN_MENU: bool = false;
                     if unsafe { IN_MENU } {
+                        crate::dbglog!("tray click mouse=0x{mouse:X} ignored: menu already open");
                         return LRESULT(0);
                     }
                     unsafe {
                         IN_MENU = true;
                     }
                     let cfg_c = app_mut().cfg.clone();
+                    crate::dbglog!("tray menu open style={:?}", cfg_c.menu_style);
+                    debuglog::set_stage(debuglog::STAGE_MENU);
                     let cmd = if cfg_c.menu_style == MenuStyle::Glass {
                         glassmenu::show(hwnd, &cfg_c)
                     } else {
                         tray::show_menu(hwnd, &cfg_c)
                     };
+                    debuglog::set_stage(debuglog::STAGE_IDLE);
                     unsafe {
                         IN_MENU = false;
                     }
+                    crate::dbglog!("tray menu closed cmd={cmd:?}");
                     if let Some(id) = cmd {
                         handle_command(hwnd, id);
                     }
@@ -1169,7 +1253,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             a.cfg.toggle_mods = mods;
                         }
                         let macros = macro_triggers(&app_mut().cfg);
-                        hotkey::set_bind(trigger, macros);
+                        hotkey::set_bind(trigger, macros, app_mut().cfg.retrigger_ms);
                         let _ = app_mut().cfg.save_keys(&[ConfigKey::ToggleKey]);
                     } else {
                         // Hand the trigger to onair-settings, which owns the
@@ -1231,6 +1315,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 fn handle_command(hwnd: HWND, id: u32) {
     use tray::*;
+    crate::dbglog!("command id={id}");
     // Adopt the live position first so no menu command can teleport
     // the window back to a stale saved position.
     sync_pos_from_window();
@@ -1385,6 +1470,11 @@ fn main() {
 
         // Config
         let mut cfg = AppConfig::load();
+        // Diagnostics are strictly opt-in: `debug_log=true` in config.ini or
+        // ONAIR_DEBUG=1 for a one-off run.
+        let debug_on = cfg.debug_log || std::env::var_os("ONAIR_DEBUG").is_some();
+        debuglog::init(debug_on, &AppConfig::config_path());
+        crate::dbglog!("start cfg={cfg:?}");
         let (cx, cy) = clamp_position(cfg.x, cfg.y, cfg.size);
         cfg.x = cx;
         cfg.y = cy;
@@ -1442,6 +1532,11 @@ fn main() {
         let reload_msg = window::register_message(window::RELOAD_CONFIG_MSG);
         let capture_msg = window::register_message(window::BEGIN_CAPTURE_MSG);
         let vm = VmClient::new();
+        crate::dbglog!(
+            "vm loaded dll_missing={} logged_in={}",
+            vm.dll_missing,
+            vm.logged_in
+        );
         // Initial unknown until first poll; do one poll now for fast startup paint.
         APP = Some(AppState {
             cfg,
@@ -1516,7 +1611,7 @@ fn main() {
         {
             let bind = app_mut().cfg.toggle_trigger();
             let macros = macro_triggers(&app_mut().cfg);
-            hotkey::init(hwnd, hinstance, bind, macros);
+            hotkey::init(hwnd, hinstance, bind, macros, app_mut().cfg.retrigger_ms);
         }
 
         let poll = app_mut().cfg.poll_ms;
@@ -1524,7 +1619,10 @@ fn main() {
 
         let mut msg = MSG::default();
         loop {
+            debuglog::waiting(true);
             let ret = GetMessageW(&mut msg, None, 0, 0);
+            debuglog::waiting(false);
+            debuglog::beat();
             if ret.0 == 0 || ret.0 == -1 {
                 break; // WM_QUIT or error
             }
@@ -1534,6 +1632,7 @@ fn main() {
 
         // Save position on exit (in case drag-end save missed)
         if let Some(a) = APP.as_mut() {
+            crate::dbglog!("exit");
             // Fallback for a WM_QUIT that arrived without WM_DESTROY.
             a.vm.shutdown();
             if let Some((x, y)) = window_rect(a.hwnd) {

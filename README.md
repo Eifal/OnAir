@@ -161,6 +161,8 @@ color_on=2ECC71
 color_off=E74C3C
 color_unknown=808080
 color_bg=141414
+retrigger_ms=40
+debug_log=false
 macro=Ctrl+Alt+F13|press|Mic mute|Strip[0].B2=!|
 macro=F14|hold|Gain up|Strip[0].Gain+=1.5|Strip[0].Gain-=1.5
 ```
@@ -168,7 +170,7 @@ macro=F14|hold|Gain up|Strip[0].Gain+=1.5|Strip[0].Gain-=1.5
 Clamps: `size` 16–512, `opacity` 20–100, `poll_ms` 30–1000,
 `hold_tap_ms` 100–2000, `bg_opacity` 0–100, `speak_threshold_db` −70…−20,
 `speak_release_ms` 100–1500, `anim_fps` 10–60, `wave_bars` 3–9,
-`level_type` 0–3. Colors are 6-digit hex without `#`.
+`level_type` 0–3, `retrigger_ms` 0–500. Colors are 6-digit hex without `#`.
 `trigger_mode` accepts `toggle` / `hold` / `both` (aliases: `press`,
 `ptt`, `toggle+hold`); unknown falls back to `toggle`.
 `vm_mode` accepts `toggle` / `switch` (aliases: `swap`, `a/b`, `alternate`,
@@ -181,7 +183,11 @@ to `dot`.
 → glass, `classic`/`win32`/`system` → native); unknown falls back to `glass`.
 `overlay_visible` (`true`/`false`, alias `show_overlay`) hides the window
 without stopping hotkeys. `macro=` rows are repeatable and documented in
-[Macro buttons](#macro-buttons).
+[Macro buttons](#macro-buttons). `retrigger_ms` (0–500, default 40) drops a
+second press of the same trigger inside that window, which filters mouse
+switch chatter and duplicated software-injected clicks; `0` disables it.
+`debug_log` (`true`/`false`, default `false`) is documented in
+[Troubleshooting](#troubleshooting-debug-log).
 
 ## Visual styles (all small, same square hitbox)
 
@@ -354,6 +360,10 @@ Details:
   games/apps AND drives the mic.
 - Keyboard auto-repeat is suppressed: one press = one down/up pair, holding
   never spams toggles. Key-up is only used by Hold/Both (ignored in Toggle).
+- A second press of the same trigger within `retrigger_ms` (default 40 ms) is
+  ignored. Worn mouse switches and vendor software that emit two down/up
+  pairs for one physical click would otherwise toggle twice (on, then off).
+  Set `retrigger_ms=0` to disable the guard.
 - In toggle mode, Hold writes the value that renders as ON (accounts for
   `invert`), so `invert=true` still gives green while held. In switch mode,
   Hold restores the exact raw A/B states saved on press.
@@ -417,6 +427,44 @@ The overlay's **Show overlay** switch (Settings → General, or the tray menu)
 hides the indicator without stopping OnAir. Hotkeys, macros and the tray icon
 keep working while it is hidden.
 
+## Troubleshooting (debug log)
+
+OnAir is silent by default. To capture what actually happens, add
+`debug_log=true` to `config.ini` (or start it once with the `ONAIR_DEBUG=1`
+environment variable) and reproduce the problem. A log appears next to
+`config.ini`:
+
+- `onair-debug.log` — current run.
+- `onair-debug.old.log` — the previous run, kept for comparison.
+
+Every line is `[+ms] ...` relative to start. The log is capped at 4 MiB per
+run, then stops writing.
+
+What is recorded:
+
+- **Trigger events** for every key/button that drives a hotkey or macro:
+  virtual key, scancode, `injected` flag, the OS event time and the modifier
+  state. Two `down` lines a few ms apart for one physical press mean chatter
+  (hardware) or a duplicated injected click (vendor software), not an OnAir
+  bug. A `down` with no preceding physical press and `injected=true` points at
+  another program sending the button. Suppressed presses say
+  `suppressed: retrigger guard`.
+- **Hold decisions**: `hold up ... dur=NNms threshold=NNms tap=true/false`.
+  With `trigger_mode=both`, a press released later than `hold_tap_ms` is
+  momentary and reverts — that is the mode working as designed, not a
+  spontaneous toggle.
+- **Voicemeeter writes**: the value read before, the value written and the
+  Remote API return code (`vm switch ...`, `vm set ...`).
+- **Slow calls** (`SLOW ...`): any Remote API, tray or Shell call that blocked
+  the UI thread for 25 ms or more.
+- **Watchdog**: `WATCHDOG ui thread stalled for Nms, stage=poll|action|menu`
+  is written *while* the UI thread is blocked, so a "Not Responding" episode
+  names the operation that caused it.
+
+The menu also has a fallback dismissal: if Windows denies it foreground
+rights, a click outside (or Esc) still closes it instead of leaving the app
+in a modal loop.
+
 ## Safety / non-goals
 
 - Separate top-most window only, plus low-level input hooks for the optional
@@ -425,7 +473,8 @@ keep working while it is hidden.
 - No sound, no clickable overlay, no settings UI inside the overlay itself
   (a separate `onair-settings.exe` ships alongside it), no separate
   hotkey driver or background service, no autostart, no auto-update, no
-  telemetry, no log files. The optional keybind is handled in-process.
+  telemetry. No log files unless `debug_log=true` is set explicitly; the
+  optional keybind is handled in-process.
 - Windows 10/11 64-bit only.
 
 ## Layout

@@ -239,6 +239,7 @@ pub fn open_settings() {
         };
         let p = to_wide(path.to_string_lossy().as_ref());
         let op = to_wide("open");
+        let started = std::time::Instant::now();
         let result = ShellExecuteW(
             None,
             PCWSTR(op.as_ptr()),
@@ -246,6 +247,11 @@ pub fn open_settings() {
             None,
             None,
             SW_SHOWNORMAL,
+        );
+        crate::debuglog::slow(
+            "shell execute settings",
+            started.elapsed().as_millis(),
+            path.display(),
         );
         if (result.0 as isize) <= 32 {
             message_box(
