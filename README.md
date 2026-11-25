@@ -383,10 +383,18 @@ Details:
   `Num-`, `Num*`, `Num/`, `Num.` and keep working with NumLock on or off.
   A dedicated Insert/Delete/Home/arrow key is kept separate from the numpad
   key that shares its position.
-- Technique: `WH_KEYBOARD_LL` + `WH_MOUSE_LL` on our own UI thread (same
-  pattern as Discord push-to-talk) — no injection, no game memory access,
-  no admin needed. Hooks are installed only while a bind exists or capture
-  is active; if installation fails, the feature silently stays inactive.
+- Technique: `WH_KEYBOARD_LL` + `WH_MOUSE_LL` on a dedicated hotkey thread
+  with its own minimal message loop (Discord-style push-to-talk) — no
+  injection, no game memory access, no admin needed. Windows delivers a
+  low-level hook *through the installing thread*, so a slow Voicemeeter poll,
+  disk write or menu on the UI thread used to swallow presses; separating them
+  means a busy overlay never drops a trigger. Modifiers are read live from the
+  keyboard state, so a missed key-up (lock screen, UAC, RDP) cannot leave
+  `Ctrl` stuck and make the hotkey look dead until a restart.
+- Hooks are installed only while a bind exists or capture is active, and are
+  re-checked every 30 s: if Windows silently removed one (no API reports it),
+  it is reinstalled, and a failed install is retried. If installation keeps
+  failing, the feature stays inactive and the debug log says so.
 
 ## Macro buttons
 
@@ -450,7 +458,14 @@ What is recorded:
   (hardware) or a duplicated injected click (vendor software), not an OnAir
   bug. A `down` with no preceding physical press and `injected=true` points at
   another program sending the button. Suppressed presses say
-  `suppressed: retrigger guard`.
+  `suppressed: retrigger guard`. A press with `mods=0x1` and no following
+  `key down` means a modifier really was held (triggers match modifiers
+  exactly), not that the hotkey was ignored.
+- **Hotkey plumbing**: `hotkey thread spawned`, `hotkey hooks installed kb=...
+  ms=...`, `hotkey hook had been removed by windows, reinstalled` and
+  `released a stale press (key-up was missed)`. Hooks run on their own thread,
+  so a slow poll cannot swallow a press; these lines prove the hooks are alive
+  and that lost key-ups self-heal.
 - **Hold decisions**: `hold up ... dur=NNms threshold=NNms tap=true/false`.
   With `trigger_mode=both`, a press released later than `hold_tap_ms` is
   momentary and reverts — that is the mode working as designed, not a
@@ -500,7 +515,7 @@ src/
   tray.rs      // Shell_NotifyIcon, minimal menu model, native menu, tooltip
   glassmenu.rs // custom acrylic tray menu (rendered from tray::build_model)
   config.rs    // re-exports onair-config (load / save / defaults / clamps)
-  hotkey.rs    // WH_KEYBOARD_LL + WH_MOUSE_LL mic toggle bind + capture
+  hotkey.rs    // WH_KEYBOARD_LL + WH_MOUSE_LL on their own thread: toggle bind + capture
 crates/
   onair-config/ // shared config parsing / clamps / atomic update / settings-write
   onair-settings/ // Slint settings window (native frame, DWM title bar,

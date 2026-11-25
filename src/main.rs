@@ -1652,5 +1652,7 @@ fn main() {
             }
             let _ = a.cfg.save_keys(OVERLAY_KEYS);
         }
+        // Drain the async log so the last lines of a run are on disk.
+        debuglog::shutdown();
     }
 }

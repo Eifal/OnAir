@@ -14,6 +14,12 @@
 //! - a watchdog thread that logs when the UI thread stops pumping messages,
 //!   including which operation it was stuck in.
 //!
+//! Writing is asynchronous: callers (including the low-level hook procs) only
+//! format a line and push it onto a bounded queue. A dedicated thread owns the
+//! file, so a slow disk can never stall the hook thread — which would make
+//! Windows drop the hook. When the queue or the size cap is reached, lines are
+//! dropped instead of blocking.
+//!
 //! The log is capped at 4 MiB per run and then stops, so a forgotten flag can
 //! never fill the disk.
 
@@ -21,8 +27,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Anything slower than this is written to the log. Normal Remote API calls
 /// are microseconds; a value in the hundreds of ms means the UI thread stalled.
@@ -34,10 +41,23 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// The UI thread is considered stalled after this long without a message.
 const STALL_MS: u64 = 3000;
 
+/// Pending lines kept in memory. ~1 MiB of text; beyond this lines are
+/// dropped rather than blocking the caller.
+const QUEUE_LINES: usize = 8192;
+
+/// How long `flush()` waits for the writer to catch up at exit.
+const FLUSH_WAIT: Duration = Duration::from_millis(500);
+
+enum Msg {
+    Line(String),
+    Flush(std::sync::mpsc::Sender<()>),
+    Stop,
+}
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static BYTES: AtomicU64 = AtomicU64::new(0);
+static DROPPED: AtomicU64 = AtomicU64::new(0);
 static START: OnceLock<Instant> = OnceLock::new();
-static LOG: OnceLock<Mutex<File>> = OnceLock::new();
+static TX: OnceLock<SyncSender<Msg>> = OnceLock::new();
 static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 static STAGE: AtomicU8 = AtomicU8::new(STAGE_IDLE);
 /// True while the UI thread sits in a blocking message wait. Waiting for input
@@ -127,7 +147,15 @@ pub fn init(enable: bool, config: &Path) {
     let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) else {
         return;
     };
-    let _ = LOG.set(Mutex::new(file));
+    let (tx, rx) = sync_channel(QUEUE_LINES);
+    if std::thread::Builder::new()
+        .name("onair-log".to_string())
+        .spawn(move || writer(rx, file))
+        .is_err()
+    {
+        return;
+    }
+    let _ = TX.set(tx);
     START.get_or_init(Instant::now);
     ENABLED.store(true, Ordering::Relaxed);
     write(format_args!(
@@ -142,33 +170,83 @@ pub fn init(enable: bool, config: &Path) {
     start_watchdog();
 }
 
-/// Write one line. No-op unless enabled and the cap has not been reached.
+/// Owns the file for the whole run. Writes and flushes there so no caller,
+/// especially a low-level hook proc, ever waits for the disk.
+fn writer(rx: Receiver<Msg>, file: File) {
+    let mut file = file;
+    let mut bytes: u64 = 0;
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Line(line) => {
+                if bytes >= MAX_BYTES {
+                    continue;
+                }
+                let dropped = DROPPED.swap(0, Ordering::Relaxed);
+                if dropped > 0 {
+                    let note = format!(
+                        "[{:>8}ms] ... {dropped} log lines dropped (writer behind)\n",
+                        elapsed_ms()
+                    );
+                    let _ = file.write_all(note.as_bytes());
+                    bytes += note.len() as u64;
+                }
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+                bytes += line.len() as u64;
+                if bytes >= MAX_BYTES {
+                    let _ = file.write_all(b"=== log cap reached, logging stopped ===\n");
+                    let _ = file.flush();
+                    ENABLED.store(false, Ordering::Relaxed);
+                }
+            }
+            Msg::Flush(ack) => {
+                let _ = file.flush();
+                let _ = ack.send(());
+            }
+            Msg::Stop => break,
+        }
+    }
+    let _ = file.flush();
+}
+
+/// Write one line. No-op unless enabled; never blocks.
 pub fn write(args: std::fmt::Arguments<'_>) {
     if !enabled() {
         return;
     }
-    let Some(lock) = LOG.get() else {
+    let Some(tx) = TX.get() else {
         return;
     };
-    let mut line = format!("[{:>8}ms] ", elapsed_ms());
+    let mut line = String::with_capacity(96);
     use std::fmt::Write as _;
+    let _ = write!(line, "[{:>8}ms] ", elapsed_ms());
     let _ = line.write_fmt(args);
     line.push('\n');
-    let Ok(mut file) = lock.lock() else {
+    match tx.try_send(Msg::Line(line)) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+/// Wait for the writer to catch up (exit path only, bounded).
+pub fn flush() {
+    let Some(tx) = TX.get() else {
         return;
     };
-    let used = BYTES.load(Ordering::Relaxed);
-    if used >= MAX_BYTES {
-        ENABLED.store(false, Ordering::Relaxed);
-        return;
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    if tx.try_send(Msg::Flush(ack_tx)).is_ok() {
+        let _ = ack_rx.recv_timeout(FLUSH_WAIT);
     }
-    let _ = file.write_all(line.as_bytes());
-    let _ = file.flush();
-    BYTES.store(used + line.len() as u64, Ordering::Relaxed);
-    if used + line.len() as u64 >= MAX_BYTES {
-        let _ = file.write_all(b"=== log cap reached, logging stopped ===\n");
-        let _ = file.flush();
-        ENABLED.store(false, Ordering::Relaxed);
+}
+
+/// Flush and stop the writer thread.
+pub fn shutdown() {
+    flush();
+    if let Some(tx) = TX.get() {
+        let _ = tx.try_send(Msg::Stop);
     }
 }
 
@@ -185,7 +263,7 @@ fn start_watchdog() {
         .spawn(|| {
             let mut stalled = false;
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(500));
                 if !enabled() {
                     return;
                 }

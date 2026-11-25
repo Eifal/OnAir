@@ -1,22 +1,44 @@
 //! Global hotkeys via low-level hooks (WH_KEYBOARD_LL + WH_MOUSE_LL).
 //!
 //! Design notes:
-//! - The hook procs run on our UI thread (low-level hooks execute in the
-//!   installing thread's context). They do O(n) matching over a small list of
-//!   triggers and only PostMessage our window; all state changes happen in
-//!   wndproc handlers. They NEVER touch APP, so there is no reentrancy hazard.
-//! - Events are always passed through (CallNextHookEx): a bound key keeps
-//!   its normal function in games/apps AND runs its OnAir action.
+//! - The hooks live on their own thread ("onair-hotkeys") with a minimal
+//!   message loop. Windows delivers a low-level hook call *through the
+//!   installing thread*: while that thread is busy the event is dropped, and a
+//!   hook proc that blocks longer than `LowLevelHooksTimeout` (300 ms by
+//!   default) gets removed silently. Keeping Voicemeeter polling, painting,
+//!   tray menus and config writes on the UI thread means a slow poll can never
+//!   swallow a press or kill the hook.
+//! - Hook procs only match against a small trigger list and PostMessage our
+//!   window; no file I/O, no Remote API, no dialogs. All state changes happen
+//!   in wndproc handlers.
+//! - Modifiers are read from the live keyboard state on every event instead of
+//!   being accumulated from down/up events. A missed key-up (lock screen, UAC,
+//!   RDP reconnect, a stalled hook) used to leave Ctrl "held" forever, which
+//!   silently stopped every unmodified trigger from matching until the app was
+//!   restarted.
+//! - A key/button counts as released when the OS reports it up, so a dropped
+//!   key-up cannot wedge a trigger in the "still down" state either.
+//! - Events are always passed through (CallNextHookEx): a bound key keeps its
+//!   normal function in games/apps AND runs its OnAir action.
+//! - The hooks are re-installed periodically. There is no API to ask whether a
+//!   low-level hook was removed, so a fresh install is the only way back.
 //! - Mouse coverage is whatever Windows itself sees: Left/Right/Middle/X1/X2.
 //!   Extra vendor buttons are invisible to low-level hooks OS-wide.
 //! - Trigger modifiers are matched exactly: `Ctrl+F13` fires only while Ctrl
 //!   is held, and a bare `F13` trigger does not fire while Ctrl is held. This
 //!   lets one key host several macros.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
+    VK_RWIN,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::{normalize_vk, Modifiers, MouseBtn, ToggleKey, Trigger};
@@ -34,6 +56,15 @@ pub const ACTION_TOGGLE: usize = 0;
 pub fn action_macro(index: usize) -> usize {
     index + 1
 }
+
+/// Private message: apply a config change to the hook thread right away
+/// instead of waiting for the next periodic health check.
+const WM_HOTKEY_SYNC: u32 = WM_APP + 0x51;
+/// Thread timer id for the periodic hook health check.
+const TIMER_HOOK_CHECK: usize = 0x0A11;
+/// Re-install the low-level hooks this often (seconds). Cheap, and the only
+/// way to recover a hook that Windows removed without telling us.
+const HOOK_REFRESH_MS: u32 = 30_000;
 
 fn mods_bits(mods: Modifiers) -> usize {
     (mods.ctrl as usize)
@@ -57,122 +88,144 @@ pub fn captured_kind(wparam: usize) -> usize {
     wparam & 0xFF
 }
 
-static mut HOOK_KB: Option<HHOOK> = None;
-static mut HOOK_MS: Option<HHOOK> = None;
-static mut TARGET: HWND = HWND(std::ptr::null_mut());
-static mut BIND: Trigger = Trigger::NONE;
-static mut MACROS: Vec<Trigger> = Vec::new();
-static mut CAPTURING: bool = false;
-// Modifier state as of the last hook event. Low-level hooks always see the
-// modifier down/up pair before the key that uses them.
-static mut MODS: Modifiers = Modifiers {
-    ctrl: false,
-    alt: false,
-    shift: false,
-    win: false,
-};
-// True between a matched action's key-down and its key-up. Suppresses
-// keyboard auto-repeat (holding a key re-fires WM_KEYDOWN) so a hold is one
-// down/up pair, and a press fires once per physical press.
-static mut DOWN_TOGGLE: bool = false;
-static mut DOWN_MACROS: Vec<bool> = Vec::new();
-// Re-trigger guard: ignore a second press of the same trigger within
-// `GUARD_MS`. Mouse switches that are worn out (and vendor software that
-// duplicates a click) emit down/up/down/up within a few ms; two full presses
-// in that window cannot be human. 0 disables the guard.
-static mut GUARD_MS: u32 = 0;
-static mut LAST_TOGGLE: Option<Instant> = None;
-static mut LAST_MACROS: Vec<Option<Instant>> = Vec::new();
-
-fn target() -> HWND {
-    unsafe { TARGET }
+struct State {
+    /// Main window handle as `isize` so the shared state stays `Sync`.
+    target: isize,
+    bind: Trigger,
+    macros: Vec<Trigger>,
+    guard_ms: u32,
+    capturing: bool,
+    /// `Some` while a matched press is down: the instant it started. Cleared on
+    /// release, on a bind change, and when a new press arrives while the OS
+    /// reports the key as up (the key-up was lost).
+    down_toggle: Option<Instant>,
+    down_macros: Vec<Option<Instant>>,
+    last_toggle: Option<Instant>,
+    last_macros: Vec<Option<Instant>>,
+    thread_id: u32,
 }
 
-/// Install only the hooks that are not installed yet. Called lazily when a
-/// bind exists or capture starts, so an unbound app has no global hooks.
-fn ensure_hooks() {
-    unsafe {
-        let module = GetModuleHandleW(None).unwrap_or_default();
-        let hinstance = HINSTANCE(module.0);
-        if HOOK_KB.is_none() {
-            HOOK_KB = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinstance), 0).ok();
+impl State {
+    fn new() -> Self {
+        Self {
+            target: 0,
+            bind: Trigger::NONE,
+            macros: Vec::new(),
+            guard_ms: 0,
+            capturing: false,
+            down_toggle: None,
+            down_macros: Vec::new(),
+            last_toggle: None,
+            last_macros: Vec::new(),
+            thread_id: 0,
         }
-        if HOOK_MS.is_none() {
-            HOOK_MS = SetWindowsHookExW(WH_MOUSE_LL, Some(ms_proc), Some(hinstance), 0).ok();
+    }
+
+    fn has_binds(&self) -> bool {
+        !self.bind.is_none() || !self.macros.is_empty()
+    }
+
+    fn wanted(&self) -> bool {
+        self.has_binds() || self.capturing
+    }
+
+    fn reset_downs(&mut self) {
+        self.down_toggle = None;
+        self.down_macros = vec![None; self.macros.len()];
+        self.last_toggle = None;
+        self.last_macros = vec![None; self.macros.len()];
+    }
+}
+
+/// Shared between the UI thread (config updates, `is_capturing`) and the hook
+/// thread (matching). Every critical section is a few field assignments.
+fn state() -> MutexGuard<'static, State> {
+    static STATE: OnceLock<Mutex<State>> = OnceLock::new();
+    STATE
+        .get_or_init(|| Mutex::new(State::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn start_thread() {
+    static SPAWNED: AtomicBool = AtomicBool::new(false);
+    if SPAWNED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    match std::thread::Builder::new()
+        .name("onair-hotkeys".to_string())
+        .spawn(hook_thread)
+    {
+        Ok(_) => crate::dbglog!("hotkey thread spawned"),
+        Err(err) => {
+            SPAWNED.store(false, Ordering::SeqCst);
+            crate::dbglog!("hotkey thread failed: {err}");
         }
     }
 }
 
-fn remove_hooks() {
-    unsafe {
-        if let Some(h) = HOOK_KB.take() {
-            let _ = UnhookWindowsHookEx(h);
+/// Tell the hook thread to re-check the desired hook state now.
+fn wake() {
+    let tid = state().thread_id;
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_HOTKEY_SYNC, WPARAM(0), LPARAM(0));
         }
-        if let Some(h) = HOOK_MS.take() {
-            let _ = UnhookWindowsHookEx(h);
-        }
-        DOWN_TOGGLE = false;
-        DOWN_MACROS.iter_mut().for_each(|down| *down = false);
-        LAST_TOGGLE = None;
-        LAST_MACROS.iter_mut().for_each(|last| *last = None);
     }
-}
-
-fn has_binds() -> bool {
-    unsafe { !BIND.is_none() || !MACROS.is_empty() }
 }
 
 /// Install hooks only if at least one trigger is configured. Safe to call
-/// once at startup; on failure the hotkeys simply stay inactive (no popups).
+/// once at startup; on failure the hotkeys stay inactive but are retried by
+/// the periodic health check (no popups).
 pub fn init(hwnd: HWND, _hinstance: HINSTANCE, bind: Trigger, macros: Vec<Trigger>, guard_ms: u32) {
-    unsafe {
-        TARGET = hwnd;
-        BIND = bind;
-        MACROS = macros;
-        DOWN_MACROS = vec![false; MACROS.len()];
-        LAST_MACROS = vec![None; MACROS.len()];
-        GUARD_MS = guard_ms;
+    {
+        let mut st = state();
+        st.target = hwnd.0 as isize;
+        st.bind = bind;
+        st.macros = macros;
+        st.guard_ms = guard_ms;
+        st.reset_downs();
     }
-    if has_binds() {
-        ensure_hooks();
-    }
+    start_thread();
 }
 
 pub fn shutdown() {
-    remove_hooks();
-    unsafe {
-        CAPTURING = false;
+    let tid = {
+        let mut st = state();
+        st.capturing = false;
+        st.thread_id
+    };
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
 /// Refresh the shadow triggers after cfg changes (called from wndproc only).
 /// Resets the down trackers so a bind change mid-hold cannot stick them.
 pub fn set_bind(bind: Trigger, macros: Vec<Trigger>, guard_ms: u32) {
-    unsafe {
-        BIND = bind;
-        MACROS = macros;
-        DOWN_TOGGLE = false;
-        DOWN_MACROS = vec![false; MACROS.len()];
-        LAST_TOGGLE = None;
-        LAST_MACROS = vec![None; MACROS.len()];
-        GUARD_MS = guard_ms;
+    {
+        let mut st = state();
+        st.bind = bind;
+        st.macros = macros;
+        st.guard_ms = guard_ms;
+        st.reset_downs();
     }
-    if !has_binds() && !is_capturing() {
-        remove_hooks();
-    } else {
-        ensure_hooks();
-    }
+    start_thread();
+    wake();
 }
 
 pub fn set_capturing(on: bool) {
-    unsafe {
-        CAPTURING = on;
-    }
+    state().capturing = on;
     if on {
-        ensure_hooks();
-    } else if !has_binds() {
-        remove_hooks();
+        start_thread();
     }
+    wake();
+}
+
+pub fn is_capturing() -> bool {
+    state().capturing
 }
 
 fn modifier_flag(vk: u16) -> Option<fn(&mut Modifiers, bool)> {
@@ -182,6 +235,32 @@ fn modifier_flag(vk: u16) -> Option<fn(&mut Modifiers, bool)> {
         0x12 => Some(|m, on| m.alt = on),
         0x5B | 0x5C => Some(|m, on| m.win = on),
         _ => None,
+    }
+}
+
+fn vk_down(vk: u16) -> bool {
+    unsafe { GetAsyncKeyState(vk as i32) < 0 }
+}
+
+/// Modifiers as they are right now, straight from the OS. Never accumulated,
+/// so a missed key-up cannot leave a modifier stuck.
+fn live_mods() -> Modifiers {
+    Modifiers {
+        ctrl: vk_down(VK_LCONTROL.0) || vk_down(VK_RCONTROL.0),
+        alt: vk_down(VK_LMENU.0) || vk_down(VK_RMENU.0),
+        shift: vk_down(VK_LSHIFT.0) || vk_down(VK_RSHIFT.0),
+        win: vk_down(VK_LWIN.0) || vk_down(VK_RWIN.0),
+    }
+}
+
+/// Virtual-key code for a mouse trigger id, for `GetAsyncKeyState`.
+fn mouse_vk_code(btn: MouseBtn) -> u16 {
+    match btn {
+        MouseBtn::Left => 0x01,   // VK_LBUTTON
+        MouseBtn::Right => 0x02,  // VK_RBUTTON
+        MouseBtn::Middle => 0x04, // VK_MBUTTON
+        MouseBtn::X1 => 0x05,     // VK_XBUTTON1
+        MouseBtn::X2 => 0x06,     // VK_XBUTTON2
     }
 }
 
@@ -220,20 +299,20 @@ fn event_vk(info: &KBDLLHOOKSTRUCT) -> u16 {
     )
 }
 
-pub fn is_capturing() -> bool {
-    unsafe { CAPTURING }
+fn target(st: &State) -> HWND {
+    HWND(st.target as *mut std::ffi::c_void)
 }
 
-fn post_action(msg: u32, action: usize) {
+fn post_action(st: &State, msg: u32, action: usize) {
     unsafe {
-        let _ = PostMessageW(Some(target()), msg, WPARAM(action), LPARAM(0));
+        let _ = PostMessageW(Some(target(st)), msg, WPARAM(action), LPARAM(0));
     }
 }
 
-fn post_capture(kind: usize, code: usize, mods: Modifiers) {
+fn post_capture(st: &State, kind: usize, code: usize, mods: Modifiers) {
     unsafe {
         let _ = PostMessageW(
-            Some(target()),
+            Some(target(st)),
             WM_KEY_CAPTURED,
             WPARAM(kind | (mods_bits(mods) << 8)),
             LPARAM(code as isize),
@@ -255,16 +334,60 @@ fn trigger_matches(trigger: Trigger, kind: usize, code: usize, mods: Modifiers) 
 
 /// True when this physical key/button drives any configured trigger, ignoring
 /// modifiers. Only used to keep the debug log focused on relevant events.
-fn bound_key(kind: usize, code: usize) -> bool {
-    unsafe { key_matches(BIND, kind, code) || MACROS.iter().any(|t| key_matches(*t, kind, code)) }
+fn bound_key(st: &State, kind: usize, code: usize) -> bool {
+    key_matches(st.bind, kind, code) || st.macros.iter().any(|t| key_matches(*t, kind, code))
+}
+
+/// A tracked press whose key-up was missed. `GetAsyncKeyState` in a low-level
+/// hook reports the state *before* the current event, which is exactly what we
+/// need: for auto-repeat (key genuinely held) it still reports down, so the
+/// hold is not broken.
+fn is_stale(down: Option<Instant>, physically_down: bool) -> bool {
+    down.is_some() && !physically_down
+}
+
+fn still_held(kind: usize, code: usize, raw_vk: u16) -> bool {
+    let vk = match kind {
+        CAP_KEY => raw_vk,
+        CAP_MOUSE => match MouseBtn::from_id(code as u8) {
+            Some(btn) => mouse_vk_code(btn),
+            None => return true,
+        },
+        _ => return true,
+    };
+    vk_down(vk)
+}
+
+/// Drop a "still down" flag left behind by a key-up we never saw (window
+/// locked, UAC, hook removed mid-hold, ...). Without this a single missed
+/// release would make the trigger look permanently held and ignore every
+/// later press.
+fn clear_stale(st: &mut State, kind: usize, code: usize, raw_vk: u16) {
+    if !is_stale(st.down_toggle, still_held(kind, code, raw_vk)) {
+        return;
+    }
+    let toggle = st.down_toggle.is_some() && key_matches(st.bind, kind, code);
+    let macro_stuck = (0..st.down_macros.len())
+        .any(|i| st.down_macros[i].is_some() && key_matches(st.macros[i], kind, code));
+    if !toggle && !macro_stuck {
+        return;
+    }
+    if toggle {
+        st.down_toggle = None;
+    }
+    for i in 0..st.down_macros.len() {
+        if st.down_macros[i].is_some() && key_matches(st.macros[i], kind, code) {
+            st.down_macros[i] = None;
+        }
+    }
+    crate::dbglog!("released a stale press (key-up was missed)");
 }
 
 /// Re-trigger guard. Records the accepted press time and rejects a second
-/// press inside `GUARD_MS` (mouse chatter / duplicated injected clicks).
-fn retrigger_ok(last: &mut Option<Instant>) -> bool {
-    let guard = unsafe { GUARD_MS };
+/// press inside `guard_ms` (mouse chatter / duplicated injected clicks).
+fn retrigger_ok(last: &mut Option<Instant>, guard_ms: u32) -> bool {
     let now = Instant::now();
-    let allowed = guard_allows(*last, now, guard);
+    let allowed = guard_allows(*last, now, guard_ms);
     if allowed {
         *last = Some(now);
     }
@@ -282,97 +405,94 @@ fn guard_allows(last: Option<Instant>, now: Instant, guard_ms: u32) -> bool {
     }
 }
 
-unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if ncode >= 0 {
-        let msg = wparam.0 as u32;
-        if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-            let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let vk = event_vk(info);
-            if crate::debuglog::enabled() && (CAPTURING || bound_key(CAP_KEY, vk as usize)) {
-                crate::dbglog!(
-                    "hook kb down vk=0x{vk:02X} scan=0x{:X} ext={} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
-                    info.scanCode,
-                    info.flags.contains(LLKHF_EXTENDED),
-                    info.flags.contains(LLKHF_INJECTED),
-                    info.flags.contains(LLKHF_LOWER_IL_INJECTED),
-                    info.time,
-                    mods_bits(MODS),
-                    CAPTURING
-                );
-            }
-            if CAPTURING {
-                // Esc cancels capture and is never bindable. Modifiers are
-                // recorded and skipped so Ctrl+A captures Ctrl+A.
-                if vk == 0x1B {
-                    post_capture(CAP_CANCEL, 0, Modifiers::default());
-                } else if let Some(flag) = modifier_flag(vk) {
-                    flag(&mut MODS, true);
-                } else {
-                    post_capture(CAP_KEY, vk as usize, MODS);
-                }
-            } else if let Some(flag) = modifier_flag(vk) {
-                flag(&mut MODS, true);
+fn trigger_down(st: &mut State, kind: usize, code: usize, mods: Modifiers, raw_vk: u16) {
+    clear_stale(st, kind, code, raw_vk);
+    if st.down_toggle.is_none() && trigger_matches(st.bind, kind, code, mods) {
+        if retrigger_ok(&mut st.last_toggle, st.guard_ms) {
+            st.down_toggle = Some(Instant::now());
+            post_action(st, WM_KEY_DOWN, ACTION_TOGGLE);
+        } else {
+            crate::dbglog!("trigger suppressed: retrigger guard");
+        }
+    }
+    for index in 0..st.down_macros.len() {
+        let trigger = st.macros[index];
+        if st.down_macros[index].is_none() && trigger_matches(trigger, kind, code, mods) {
+            if retrigger_ok(&mut st.last_macros[index], st.guard_ms) {
+                st.down_macros[index] = Some(Instant::now());
+                post_action(st, WM_KEY_DOWN, action_macro(index));
             } else {
-                if !DOWN_TOGGLE && trigger_matches(BIND, CAP_KEY, vk as usize, MODS) {
-                    if retrigger_ok(&mut LAST_TOGGLE) {
-                        DOWN_TOGGLE = true;
-                        post_action(WM_KEY_DOWN, ACTION_TOGGLE);
-                    } else {
-                        crate::dbglog!("hook kb down vk=0x{vk:02X} suppressed: retrigger guard");
-                    }
-                }
-                for (index, trigger) in MACROS.iter().enumerate() {
-                    if !DOWN_MACROS[index] && trigger_matches(*trigger, CAP_KEY, vk as usize, MODS)
-                    {
-                        if retrigger_ok(&mut LAST_MACROS[index]) {
-                            DOWN_MACROS[index] = true;
-                            post_action(WM_KEY_DOWN, action_macro(index));
-                        } else {
-                            crate::dbglog!(
-                                "hook kb down vk=0x{vk:02X} macro {index} suppressed: retrigger guard"
-                            );
-                        }
-                    }
-                }
-            }
-        } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
-            let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let vk = event_vk(info);
-            if crate::debuglog::enabled() && bound_key(CAP_KEY, vk as usize) {
-                crate::dbglog!(
-                    "hook kb up vk=0x{vk:02X} scan=0x{:X} ext={} injected={} os_t={} mods=0x{:X}",
-                    info.scanCode,
-                    info.flags.contains(LLKHF_EXTENDED),
-                    info.flags.contains(LLKHF_INJECTED),
-                    info.time,
-                    mods_bits(MODS)
-                );
-            }
-            // Modifier tracking must stay accurate while capturing: capture is
-            // down-only, so a modifier released mid-capture would otherwise
-            // stay "held" forever and break exact-modifier matching afterwards.
-            if let Some(flag) = modifier_flag(vk) {
-                flag(&mut MODS, false);
-            }
-            // Key-up is ignored while capturing (capture is down-only).
-            if !CAPTURING {
-                // Match only the base key on release: the user may let go of
-                // Ctrl before F13, and the hold must still end cleanly.
-                if DOWN_TOGGLE && key_matches(BIND, CAP_KEY, vk as usize) {
-                    DOWN_TOGGLE = false;
-                    post_action(WM_KEY_UP, ACTION_TOGGLE);
-                }
-                for (index, trigger) in MACROS.iter().enumerate() {
-                    if DOWN_MACROS[index] && key_matches(*trigger, CAP_KEY, vk as usize) {
-                        DOWN_MACROS[index] = false;
-                        post_action(WM_KEY_UP, action_macro(index));
-                    }
-                }
+                crate::dbglog!("macro {index} suppressed: retrigger guard");
             }
         }
     }
-    // Pass-through: never swallow, the key keeps working everywhere.
-    CallNextHookEx(None, ncode, wparam, lparam)
+}
+
+fn trigger_up(st: &mut State, kind: usize, code: usize) {
+    if st.down_toggle.is_some() && key_matches(st.bind, kind, code) {
+        st.down_toggle = None;
+        post_action(st, WM_KEY_UP, ACTION_TOGGLE);
+    }
+    for index in 0..st.down_macros.len() {
+        if st.down_macros[index].is_some() && key_matches(st.macros[index], kind, code) {
+            st.down_macros[index] = None;
+            post_action(st, WM_KEY_UP, action_macro(index));
+        }
+    }
+}
+
+fn kb_event(msg: u32, lparam: LPARAM) {
+    let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+    if !down && !up {
+        return;
+    }
+    let vk = event_vk(info);
+    let mut st = state();
+
+    if down {
+        let mods = live_mods();
+        if crate::debuglog::enabled() && (st.capturing || bound_key(&st, CAP_KEY, vk as usize)) {
+            crate::dbglog!(
+                "hook kb down vk=0x{vk:02X} scan=0x{:X} ext={} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
+                info.scanCode,
+                info.flags.contains(LLKHF_EXTENDED),
+                info.flags.contains(LLKHF_INJECTED),
+                info.flags.contains(LLKHF_LOWER_IL_INJECTED),
+                info.time,
+                mods_bits(mods),
+                st.capturing
+            );
+        }
+        if st.capturing {
+            // Esc cancels capture and is never bindable. Modifiers are
+            // recorded and skipped so Ctrl+A captures Ctrl+A.
+            if vk == 0x1B {
+                post_capture(&st, CAP_CANCEL, 0, Modifiers::default());
+            } else if modifier_flag(vk).is_none() {
+                post_capture(&st, CAP_KEY, vk as usize, mods);
+            }
+            return;
+        }
+        trigger_down(&mut st, CAP_KEY, vk as usize, mods, info.vkCode as u16);
+    } else {
+        if crate::debuglog::enabled() && bound_key(&st, CAP_KEY, vk as usize) {
+            crate::dbglog!(
+                "hook kb up vk=0x{vk:02X} scan=0x{:X} ext={} injected={} os_t={}",
+                info.scanCode,
+                info.flags.contains(LLKHF_EXTENDED),
+                info.flags.contains(LLKHF_INJECTED),
+                info.time
+            );
+        }
+        // Key-up is ignored while capturing (capture is down-only), but the
+        // release trackers still have to be cleared: capture can start in the
+        // middle of a hold.
+        if !st.capturing {
+            trigger_up(&mut st, CAP_KEY, vk as usize);
+        }
+    }
 }
 
 fn xbutton_from_lparam(lparam: LPARAM) -> Option<MouseBtn> {
@@ -389,91 +509,182 @@ fn xbutton_from_lparam(lparam: LPARAM) -> Option<MouseBtn> {
     }
 }
 
+fn ms_event(msg: u32, lparam: LPARAM) {
+    // Split down vs up; X-button id comes from mouseData for both.
+    let down_btn: Option<MouseBtn> = match msg {
+        WM_LBUTTONDOWN => Some(MouseBtn::Left),
+        WM_RBUTTONDOWN => Some(MouseBtn::Right),
+        WM_MBUTTONDOWN => Some(MouseBtn::Middle),
+        WM_XBUTTONDOWN => xbutton_from_lparam(lparam),
+        _ => None,
+    };
+    let up_btn: Option<MouseBtn> = match msg {
+        WM_LBUTTONUP => Some(MouseBtn::Left),
+        WM_RBUTTONUP => Some(MouseBtn::Right),
+        WM_MBUTTONUP => Some(MouseBtn::Middle),
+        WM_XBUTTONUP => xbutton_from_lparam(lparam),
+        _ => None,
+    };
+    let Some(btn) = down_btn.or(up_btn) else {
+        return;
+    };
+    let code = btn.id() as usize;
+    let raw_vk = mouse_vk_code(btn);
+    let mut st = state();
+
+    if down_btn.is_some() {
+        let mods = live_mods();
+        if crate::debuglog::enabled() && (st.capturing || bound_key(&st, CAP_MOUSE, code)) {
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            crate::dbglog!(
+                "hook ms down btn={:?} data=0x{:X} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
+                btn,
+                info.mouseData,
+                info.flags & LLMHF_INJECTED != 0,
+                info.flags & LLMHF_LOWER_IL_INJECTED != 0,
+                info.time,
+                mods_bits(mods),
+                st.capturing
+            );
+        }
+        if st.capturing {
+            post_capture(&st, CAP_MOUSE, code, mods);
+            return;
+        }
+        trigger_down(&mut st, CAP_MOUSE, code, mods, raw_vk);
+    } else {
+        if crate::debuglog::enabled() && bound_key(&st, CAP_MOUSE, code) {
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            crate::dbglog!(
+                "hook ms up btn={:?} data=0x{:X} injected={} os_t={}",
+                btn,
+                info.mouseData,
+                info.flags & LLMHF_INJECTED != 0,
+                info.time
+            );
+        }
+        if !st.capturing {
+            trigger_up(&mut st, CAP_MOUSE, code);
+        }
+    }
+}
+
+unsafe extern "system" fn kb_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if ncode >= 0 {
+        kb_event(wparam.0 as u32, lparam);
+    }
+    // Pass-through: never swallow, the key keeps working everywhere.
+    CallNextHookEx(None, ncode, wparam, lparam)
+}
+
 unsafe extern "system" fn ms_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode >= 0 {
-        let msg = wparam.0 as u32;
-        // Split down vs up; X-button id comes from mouseData for both.
-        let down_btn: Option<MouseBtn> = match msg {
-            WM_LBUTTONDOWN => Some(MouseBtn::Left),
-            WM_RBUTTONDOWN => Some(MouseBtn::Right),
-            WM_MBUTTONDOWN => Some(MouseBtn::Middle),
-            WM_XBUTTONDOWN => xbutton_from_lparam(lparam),
-            _ => None,
-        };
-        let up_btn: Option<MouseBtn> = match msg {
-            WM_LBUTTONUP => Some(MouseBtn::Left),
-            WM_RBUTTONUP => Some(MouseBtn::Right),
-            WM_MBUTTONUP => Some(MouseBtn::Middle),
-            WM_XBUTTONUP => xbutton_from_lparam(lparam),
-            _ => None,
-        };
-        if let Some(b) = down_btn {
-            let code = b.id() as usize;
-            if crate::debuglog::enabled() && (CAPTURING || bound_key(CAP_MOUSE, code)) {
-                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-                crate::dbglog!(
-                    "hook ms down btn={:?} data=0x{:X} injected={} lower={} os_t={} mods=0x{:X} capturing={}",
-                    b,
-                    info.mouseData,
-                    info.flags & LLMHF_INJECTED != 0,
-                    info.flags & LLMHF_LOWER_IL_INJECTED != 0,
-                    info.time,
-                    mods_bits(MODS),
-                    CAPTURING
-                );
-            }
-            if CAPTURING {
-                post_capture(CAP_MOUSE, code, MODS);
-            } else {
-                if !DOWN_TOGGLE && trigger_matches(BIND, CAP_MOUSE, code, MODS) {
-                    if retrigger_ok(&mut LAST_TOGGLE) {
-                        DOWN_TOGGLE = true;
-                        post_action(WM_KEY_DOWN, ACTION_TOGGLE);
-                    } else {
-                        crate::dbglog!("hook ms down {b:?} suppressed: retrigger guard");
-                    }
-                }
-                for (index, trigger) in MACROS.iter().enumerate() {
-                    if !DOWN_MACROS[index] && trigger_matches(*trigger, CAP_MOUSE, code, MODS) {
-                        if retrigger_ok(&mut LAST_MACROS[index]) {
-                            DOWN_MACROS[index] = true;
-                            post_action(WM_KEY_DOWN, action_macro(index));
-                        } else {
-                            crate::dbglog!(
-                                "hook ms down {b:?} macro {index} suppressed: retrigger guard"
-                            );
-                        }
-                    }
-                }
-            }
-        } else if let Some(b) = up_btn {
-            let code = b.id() as usize;
-            if crate::debuglog::enabled() && bound_key(CAP_MOUSE, code) {
-                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-                crate::dbglog!(
-                    "hook ms up btn={:?} data=0x{:X} injected={} os_t={}",
-                    b,
-                    info.mouseData,
-                    info.flags & LLMHF_INJECTED != 0,
-                    info.time
-                );
-            }
-            if !CAPTURING {
-                if DOWN_TOGGLE && key_matches(BIND, CAP_MOUSE, code) {
-                    DOWN_TOGGLE = false;
-                    post_action(WM_KEY_UP, ACTION_TOGGLE);
-                }
-                for (index, trigger) in MACROS.iter().enumerate() {
-                    if DOWN_MACROS[index] && key_matches(*trigger, CAP_MOUSE, code) {
-                        DOWN_MACROS[index] = false;
-                        post_action(WM_KEY_UP, action_macro(index));
-                    }
-                }
-            }
-        }
+        ms_event(wparam.0 as u32, lparam);
     }
     // Pass-through: never swallow, the button keeps working everywhere.
     CallNextHookEx(None, ncode, wparam, lparam)
+}
+
+/// Install or drop the hooks to match the current config. Runs only on the
+/// hook thread, which is also the thread that owns the hook handles.
+fn sync_hooks(hinstance: HINSTANCE, kb: &mut Option<HHOOK>, ms: &mut Option<HHOOK>, refresh: bool) {
+    if !state().wanted() {
+        if let Some(h) = kb.take() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(h);
+            }
+        }
+        if let Some(h) = ms.take() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(h);
+            }
+        }
+        return;
+    }
+    if refresh {
+        // There is no way to query a low-level hook, so replace it. If the
+        // handle is already invalid Windows removed the hook behind our back.
+        let mut gone = false;
+        if let Some(h) = kb.take() {
+            if unsafe { UnhookWindowsHookEx(h) }.is_err() {
+                gone = true;
+            }
+        }
+        if let Some(h) = ms.take() {
+            if unsafe { UnhookWindowsHookEx(h) }.is_err() {
+                gone = true;
+            }
+        }
+        if gone {
+            crate::dbglog!("hotkey hook had been removed by windows, reinstalled");
+        }
+    }
+    if kb.is_none() {
+        *kb = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinstance), 0) }.ok();
+        if kb.is_none() {
+            crate::dbglog!("hotkey keyboard hook install failed");
+        }
+    }
+    if ms.is_none() {
+        *ms = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(ms_proc), Some(hinstance), 0) }.ok();
+        if ms.is_none() {
+            crate::dbglog!("hotkey mouse hook install failed");
+        }
+    }
+}
+
+fn hook_thread() {
+    let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
+    let hinstance = HINSTANCE(module.0);
+    let mut kb: Option<HHOOK> = None;
+    let mut ms: Option<HHOOK> = None;
+
+    state().thread_id = unsafe { GetCurrentThreadId() };
+    sync_hooks(hinstance, &mut kb, &mut ms, false);
+    crate::dbglog!(
+        "hotkey hooks installed kb={} ms={}",
+        kb.is_some(),
+        ms.is_some()
+    );
+
+    let mut msg = MSG::default();
+    unsafe {
+        // Create the thread message queue before SetTimer (thread timers need
+        // one) and so PostThreadMessage from the UI thread always lands.
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        let _ = SetTimer(None, TIMER_HOOK_CHECK, HOOK_REFRESH_MS, None);
+    }
+    loop {
+        let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if ret.0 <= 0 {
+            break;
+        }
+        // Thread messages (PostThreadMessage / thread timers) have no window.
+        if msg.hwnd.is_invalid() {
+            if msg.message == WM_HOTKEY_SYNC {
+                sync_hooks(hinstance, &mut kb, &mut ms, false);
+            } else if msg.message == WM_TIMER && msg.wParam.0 == TIMER_HOOK_CHECK {
+                sync_hooks(hinstance, &mut kb, &mut ms, true);
+            }
+            continue;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            let _ = DispatchMessageW(&msg);
+        }
+    }
+
+    unsafe {
+        let _ = KillTimer(None, TIMER_HOOK_CHECK);
+        if let Some(h) = kb.take() {
+            let _ = UnhookWindowsHookEx(h);
+        }
+        if let Some(h) = ms.take() {
+            let _ = UnhookWindowsHookEx(h);
+        }
+    }
+    state().thread_id = 0;
+    crate::dbglog!("hotkey thread stopped");
 }
 
 #[cfg(test)]
@@ -603,5 +814,17 @@ mod tests {
         ));
         // 0 disables the guard entirely.
         assert!(guard_allows(Some(t0), t0, 0));
+    }
+
+    #[test]
+    fn stale_press_is_cleared_only_when_the_key_is_up() {
+        let now = Instant::now();
+        // Nothing tracked: nothing to recover.
+        assert!(!is_stale(None, false));
+        assert!(!is_stale(None, true));
+        // Tracked and still physically held (auto-repeat): keep the hold.
+        assert!(!is_stale(Some(now), true));
+        // Tracked but the OS says the key is up: the release was lost.
+        assert!(is_stale(Some(now), false));
     }
 }
