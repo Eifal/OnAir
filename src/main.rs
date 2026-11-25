@@ -1046,6 +1046,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let want_size = (wp.flags.0 & SWP_NOSIZE.0) == 0
                             && (wp.cx != a.cfg.size as i32 || wp.cy != a.cfg.size as i32);
                         if want_move || want_size {
+                            crate::dbglog!(
+                                "rejected foreign geometry move={} size={} -> {},{} {}x{}",
+                                want_move,
+                                want_size,
+                                wp.x,
+                                wp.y,
+                                wp.cx,
+                                wp.cy
+                            );
                             wp.flags |= SWP_NOMOVE | SWP_NOSIZE;
                         }
                     }
@@ -1065,6 +1074,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_ENTERSIZEMOVE => {
+            crate::dbglog!("drag start (unlocked)");
             unsafe {
                 IN_SIZE_MOVE = true;
             }
@@ -1079,6 +1089,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
             if let Some((x, y)) = window_rect(hwnd) {
+                crate::dbglog!("drag end at {x},{y}");
                 let save = {
                     let a = app_mut();
                     a.cfg.x = x;

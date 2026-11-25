@@ -222,6 +222,16 @@ pub fn draw_overlay_into(
                 }
             }
 
+            // A layered window is hit-tested per pixel: alpha 0 is
+            // click-through. With `bg_opacity=0` (or the mostly empty Wave /
+            // Mini glyphs) only the thin outline would be grabbable, so the
+            // unlocked overlay could not be dragged. A 2% alpha floor over the
+            // rounded square is invisible but keeps the whole square
+            // interactive. Locked keeps alpha 0 on purpose (click-through).
+            if unlocked && cov_bg > 0.5 && a <= 0.0 {
+                a = 5.0 / 255.0;
+            }
+
             // Premultiply
             let ai = (a * 255.0).round().clamp(0.0, 255.0) as u32;
             let ri = (r * a).round().clamp(0.0, 255.0) as u32;
@@ -507,5 +517,22 @@ mod tests {
         assert_ne!(at(&normal, 24, 16), at(&muted, 24, 16));
         // The ring is drawn in mute colour too.
         assert_eq!((at(&muted, 38, 24) >> 16) & 0xFF, 0xE7);
+    }
+
+    #[test]
+    fn unlocked_overlay_is_grabbable_across_the_whole_square() {
+        const S: u32 = 48;
+        let dot = (0x00, 0xFF, 0x00);
+        // bg_opacity=0: the background is invisible, but while unlocked every
+        // pixel inside the rounded square must stay non-transparent so the
+        // layered window receives the click and can be dragged.
+        let open = draw_overlay(S, (0, 0, 0), dot, true, VisualStyle::Wave, 0, None);
+        let alpha = |px: &[u32], x: usize, y: usize| px[y * S as usize + x] >> 24;
+        for (x, y) in [(24, 24), (24, 10), (10, 10), (38, 38), (24, 4)] {
+            assert_ne!(alpha(&open, x, y), 0, "alpha at {x},{y} must be non-zero");
+        }
+        // Locked stays click-through: the same empty spot is fully transparent.
+        let locked = draw_overlay(S, (0, 0, 0), dot, false, VisualStyle::Wave, 0, None);
+        assert_eq!(alpha(&locked, 24, 10), 0);
     }
 }

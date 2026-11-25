@@ -257,8 +257,10 @@ restores the configured style and, for Wave, resumes the animation.
 - Global **Opacity** still applies on top of everything
   (e.g. `opacity=50` + `bg_opacity=50` = very faint bg).
 - `bg_opacity=0` = no background at all (floating dot/ring/strip).
-  Hitbox/drag area stays `size`×`size` — only the paint changes,
-  click-through when locked is unaffected.
+  While unlocked the whole `size`×`size` square stays grabbable: an invisible
+  ~2% alpha floor keeps the layered window hit-testable, so a click anywhere on
+  the square drags it (not only on the thin white outline). When locked the
+  square is fully click-through.
 - No effect on **Mini** (already has no background).
 - Settings → **Appearance → Background** or `config.ini` (`bg_opacity`, aliases
   `bg_alpha`, `background_opacity`).
@@ -455,6 +457,10 @@ What is recorded:
   spontaneous toggle.
 - **Voicemeeter writes**: the value read before, the value written and the
   Remote API return code (`vm switch ...`, `vm set ...`).
+- **Window events**: `drag start (unlocked)`, `drag end at X,Y`,
+  `lock=... exstyle 0x...` and `rejected foreign geometry ...` show whether a
+  move came from the user or from another process. A drag that never logs
+  `drag start` means the click never reached the overlay.
 - **Slow calls** (`SLOW ...`): any Remote API, tray or Shell call that blocked
   the UI thread for 25 ms or more.
 - **Watchdog**: `WATCHDOG ui thread stalled for Nms, stage=poll|action|menu`

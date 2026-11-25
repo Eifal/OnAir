@@ -103,6 +103,7 @@ pub fn apply_lock(hwnd: HWND, locked: bool) {
             ex & !WS_EX_TRANSPARENT.0
         };
         if new_ex != ex {
+            crate::dbglog!("lock={locked} exstyle 0x{ex:X} -> 0x{new_ex:X}");
             SetWindowLongPtrW(hwnd, idx, new_ex as isize);
             // Ex-style changes require FRAMECHANGED to apply immediately.
             // NOMOVE/NOSIZE/NOACTIVATE/NOZORDER: position, size, z-order
