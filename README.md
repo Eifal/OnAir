@@ -36,7 +36,7 @@ cargo build --release --workspace         # both binaries
 Both binaries ship **next to each other**; the settings app is launched
 from the tray. The overlay never links Slint.
 
-Sizes: `onair.exe` **259,584 bytes** (~254 KB). The settings exe cannot be
+Sizes: `onair.exe` **370,176 bytes** (~362 KB). The settings exe cannot be
 meaningfully smaller (~8 MB) because of the UI toolkit.
 
 Release profile (`Cargo.toml`) uses `opt-level="z"`, `lto`, `panic="abort"`,
