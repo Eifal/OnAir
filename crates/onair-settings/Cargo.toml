@@ -1,6 +1,6 @@
 [package]
 name = "onair-settings"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 rust-version = "1.92"
 description = "Slint settings window for the OnAir overlay"
